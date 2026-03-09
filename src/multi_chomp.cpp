@@ -38,7 +38,7 @@ MultiChompNode::MultiChompNode() : Node("multi_chomp_server") {
 
 void MultiChompNode::load_parameters() {
   this->declare_parameter<int>("num_robots", 6);
-  this->declare_parameter<int>("waypoints_per_robot", 100);
+  this->declare_parameter<int>("waypoints_per_robot", 50);
   this->declare_parameter<double>("dt", 0.1);
   this->declare_parameter<double>("eta", 10000.0);
   this->declare_parameter<double>("lambda", 0.01);

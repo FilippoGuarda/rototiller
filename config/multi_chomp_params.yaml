@@ -1,7 +1,7 @@
 multi_chomp_node:
   ros__parameters:
     num_robots: 6
-    waypoints_per_robot: 100
+    waypoints_per_robot: 50
     dt: 1.0
     eta: 0.5        # learning rate
     lambda: 10.0       # smoothness 
