@@ -8,12 +8,11 @@ MultiChompNode::MultiChompNode() : Node("multi_chomp_server") {
   load_parameters();
   init_matrices();
 
-  // 1. FIXED: Pre-allocate goal/start arrays on boot so they are never accessed out-of-bounds
   start_states_.resize(params_.num_robots, Eigen::Vector2d::Zero());
   goal_states_.resize(params_.num_robots, Eigen::Vector2d::Zero());
 
   marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("plan_markers", 100);
-  
+
   for(int r = 0; r < params_.num_robots; ++r) {
       path_pubs_.push_back(this->create_publisher<nav_msgs::msg::Path>(
           "robot" + std::to_string(r + 1) + "/optimized_path", 10));
@@ -32,7 +31,7 @@ MultiChompNode::MultiChompNode() : Node("multi_chomp_server") {
       std::chrono::milliseconds(20),
       std::bind(&MultiChompNode::timer_callback, this));
 
-  optimization_active_ = false; // 2. FIXED: Block execution until paths are loaded
+  optimization_active_ = false;
 
   RCLCPP_INFO(this->get_logger(), "Multi-CHOMP server initialized for %d robots", params_.num_robots);
 }
@@ -247,7 +246,6 @@ std::vector<Eigen::Vector2d> MultiChompNode::resample_path(const nav_msgs::msg::
 }
 
 bool MultiChompNode::set_paths(const std::vector<nav_msgs::msg::Path> & paths) {
-    // 3. FIXED: Thread Safety - lock during matrix manipulation
     std::lock_guard<std::mutex> lock(trajectory_mutex_);
 
     int new_num_robots = static_cast<int>(paths.size());
@@ -274,11 +272,9 @@ bool MultiChompNode::set_paths(const std::vector<nav_msgs::msg::Path> & paths) {
                 "robot" + std::to_string(r + 1) + "/optimized_path", 10));
         }
     }
-
     for (int r = 0; r < params_.num_robots; ++r) {
         const auto & path = paths[r];
 
-        // NEW LOGIC: Empty path means "Keep existing active trajectory"
         if (path.poses.empty()) {
             if (reset_required) return false;
             continue;
@@ -317,7 +313,8 @@ void MultiChompNode::update_starts_from_tf() {
 
       int shift_idx = 0;
       double min_dist = std::numeric_limits<double>::infinity();
-      int search_horizon = std::min(nq, 15); 
+
+      int search_horizon = std::min(nq, 50); 
 
       for (int k = 0; k < search_horizon; ++k) {
           Eigen::Vector2d pt = xi_.block(offset + k * cdim_, 0, cdim_, 1);
@@ -325,18 +322,10 @@ void MultiChompNode::update_starts_from_tf() {
           if (dist < min_dist) { min_dist = dist; shift_idx = k; }
       }
 
-      // if path too corrupted just ask new plan
-      if (min_dist > 0.5) {
-          Eigen::Vector2d delta = current_pos - xi_.block(offset + shift_idx * cdim_, 0, cdim_, 1);
-          for (int k = 0; k < nq; ++k) {
-              xi_.block(offset + k * cdim_, 0, cdim_, 1) += delta;
-          }
-          start_states_[r] = current_pos;
-          goal_states_[r] += delta;
+      if (min_dist > 0.6) {
           continue;
       }
 
-      // Normal clipping
       if (shift_idx > 0) {
           for (int k = 0; k < nq - shift_idx; ++k) {
               xi_.block(offset + k * cdim_, 0, cdim_, 1) = xi_.block(offset + (k + shift_idx) * cdim_, 0, cdim_, 1);
@@ -346,26 +335,12 @@ void MultiChompNode::update_starts_from_tf() {
           }
       }
 
-      Eigen::Vector2d new_pt0 = xi_.block(offset, 0, cdim_, 1);
-      Eigen::Vector2d delta = current_pos - new_pt0;
-
-      if (delta.norm() > 0.02) {
-          // Smoothly blend the positional error into the first 5 waypoints
-          int blend_horizon = std::min(nq, 5);
-          for (int k = 0; k < blend_horizon; ++k) {
-              double weight = 1.0 - (static_cast<double>(k) / blend_horizon);
-              xi_.block(offset + k * cdim_, 0, cdim_, 1) += delta * weight;
-          }
-      }
-
-      xi_.block(offset, 0, cdim_, 1) = current_pos;
-      start_states_[r] = current_pos;
+      start_states_[r] = xi_.block(offset, 0, cdim_, 1);
   }
 }
 
-
 void MultiChompNode::timer_callback() {
-  std::lock_guard<std::mutex> traj_lock(trajectory_mutex_); // 3. FIXED: Synchronize timer with setter
+  std::lock_guard<std::mutex> traj_lock(trajectory_mutex_); 
   if (!optimization_active_ || xidim_ == 0 || xi_.size() == 0) return;
 
   update_starts_from_tf();
@@ -403,7 +378,7 @@ void MultiChompNode::solve_step() {
       for (int i = 0; i < nq; ++i) {
           int idx = offset + i * cdim_;
           VectorXd qq = xi_.block(idx, 0, cdim_, 1);
-          
+
           VectorXd qd = VectorXd::Zero(cdim_);
           if (i == 0) qd = (xi_.block(idx + cdim_, 0, cdim_, 1) - start_p) / (2.0 * dt);
           else if (i == nq - 1) qd = (end_p - xi_.block(idx - cdim_, 0, cdim_, 1)) / (2.0 * dt);
@@ -420,9 +395,12 @@ void MultiChompNode::solve_step() {
           Eigen::Vector2d grad_env;
           double cost_val = get_environment_cost(qq(0), qq(1), grad_env);
 
+          double start_fade = 1.0;
+          if (i < 5) start_fade = static_cast<double>(i) / 5.0;
+
           if (cost_val > 1.0) {
               VectorXd delta = -VectorXd(grad_env);
-              nabla_obs.block(idx, 0, cdim_, 1) += vel * (prj * delta * params_.dt * cost_val - cost_val * kappa);
+              nabla_obs.block(idx, 0, cdim_, 1) += start_fade * vel * (prj * delta * params_.dt * cost_val - cost_val * kappa);
           }
 
           const double safety_dist = 2.0 * params_.robot_radius;
