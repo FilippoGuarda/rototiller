@@ -5,7 +5,7 @@ from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
 from geometry_msgs.msg import PoseStamped, Point, Quaternion
 from nav2_msgs.action import ComputePathToPose, FollowPath
-from extended_spades.action import MultiChompOptimize
+from multi_chomp.action import MultiChompOptimize
 from action_msgs.msg import GoalStatus
 import nav_msgs.msg
 import tf2_ros

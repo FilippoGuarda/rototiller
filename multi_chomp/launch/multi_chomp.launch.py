@@ -22,7 +22,7 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
-    pkg_dir = FindPackageShare('extended_spades')
+    pkg_dir = FindPackageShare('multi_chomp')
     
     use_sim_time_arg = DeclareLaunchArgument(
         'use_sim_time',
@@ -38,7 +38,7 @@ def generate_launch_description():
 
     # fleet path deconfliction
     coordinator_node = Node(
-        package='extended_spades',
+        package='multi_chomp',
         executable='multi_chomp_coordinator.py', 
         name='fleet_coordinator',
         output='screen',
@@ -51,7 +51,7 @@ def generate_launch_description():
 
     # multi chomp server
     server_node = Node(
-        package='extended_spades',
+        package='multi_chomp',
         executable='multi_chomp_action_server',
         name='multi_chomp_server',
         output='screen',

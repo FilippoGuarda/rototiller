@@ -1,5 +1,5 @@
-#ifndef EXTENDED_SPADES__MULTI_CHOMP_HPP_
-#define EXTENDED_SPADES__MULTI_CHOMP_HPP_
+#ifndef MULTI_CHOMP__MULTI_CHOMP_HPP_
+#define MULTI_CHOMP__MULTI_CHOMP_HPP_
 
 #include <vector>
 #include <memory>
@@ -116,4 +116,4 @@ private:
 };
 
 
-#endif //EXTENDED_SPADES__MULTI_CHOMP_HPP_
+#endif //MULTI_CHOMP__MULTI_CHOMP_HPP_

@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>extended_spades</name>
+  <name>multi_chomp</name>
   <version>0.0.1</version>
   <description>Multi-CHOMP implementation for ROS 2</description>
   <maintainer email="filippo.gaurda96@gmail.com">Filippo Guarda</maintainer>
