@@ -1,0 +1,71 @@
+# Station Configuration for Multi-Robot Task Allocation
+# Format: stations are organized by type (a, b, c)
+# Each task requires visiting: A -> B -> C
+
+stations:
+  # Type A stations (first waypoint)
+  a:
+    - name: station_a1
+      x: 1.0
+      y: 0.0
+      online: true
+    - name: station_a2
+      x: 2.0
+      y: 1.5
+      online: true
+    - name: station_a3
+      x: 1.5
+      y: 2.5
+      online: true
+
+  # Type B stations (intermediate waypoint)
+  b:
+    - name: station_b1
+      x: 5.0
+      y: 2.0
+      online: true
+    - name: station_b2
+      x: 6.0
+      y: 3.5
+      online: true
+    - name: station_b3
+      x: 5.5
+      y: 1.0
+      online: false  # Example of offline station
+
+  # Type C stations (final destination)
+  c:
+    - name: station_c1
+      x: 10.0
+      y: 5.0
+      online: true
+    - name: station_c2
+      x: 11.0
+      y: 6.5
+      online: true
+    - name: station_c3
+      x: 10.5
+      y: 3.5
+      online: true
+
+# Robot configuration
+robots:
+  count: 6
+  namespace_prefix: robot
+
+  battery:
+    max_range_m: 10000.0
+    min_soc: 0.2
+
+# Task allocation algorithm parameters
+allocation:
+  alpha_distance: 1.0
+  alpha_usage: 0.5
+  alpha_battery: 2.0
+  update_rate_hz: 2.0
+  node_match_threshold_m: 0.5
+
+# ROS2 parameters
+ros:
+  global_frame: map
+  robot_base_frame_suffix: /base_link
