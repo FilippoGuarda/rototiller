@@ -1,71 +1,61 @@
-# Station Configuration for Multi-Robot Task Allocation
-# Format: stations are organized by type (a, b, c)
-# Each task requires visiting: A -> B -> C
+task_allocation_node:
+  ros__parameters:
+    num_robots: 6
+    global_frame: map
+    robot_base_frame_prefix: robot
+    robot_base_frame_suffix: /base_link
+    node_match_threshold_m: 0.75
+    update_rate_hz: 2.0
 
-stations:
-  # Type A stations (first waypoint)
-  a:
-    - name: station_a1
-      x: 1.0
-      y: 0.0
-      online: true
-    - name: station_a2
-      x: 2.0
-      y: 1.5
-      online: true
-    - name: station_a3
-      x: 1.5
-      y: 2.5
-      online: true
+    alpha_distance: 1.0
+    alpha_usage: 0.5
+    alpha_battery: 2.0
 
-  # Type B stations (intermediate waypoint)
-  b:
-    - name: station_b1
-      x: 5.0
-      y: 2.0
-      online: true
-    - name: station_b2
-      x: 6.0
-      y: 3.5
-      online: true
-    - name: station_b3
-      x: 5.5
-      y: 1.0
-      online: false  # Example of offline station
+    robot_defaults:
+      battery_soc: 1.0
+      max_range_m: 10000.0
+      usage_index: 0.0
 
-  # Type C stations (final destination)
-  c:
-    - name: station_c1
-      x: 10.0
-      y: 5.0
-      online: true
-    - name: station_c2
-      x: 11.0
-      y: 6.5
-      online: true
-    - name: station_c3
-      x: 10.5
-      y: 3.5
-      online: true
-
-# Robot configuration
-robots:
-  count: 6
-  namespace_prefix: robot
-
-  battery:
-    max_range_m: 10000.0
-    min_soc: 0.2
-
-# Task allocation algorithm parameters
-allocation:
-  alpha_distance: 1.0
-  alpha_usage: 0.5
-  alpha_battery: 2.0
-  update_rate_hz: 2.0
-  node_match_threshold_m: 0.5
-
-# ROS2 parameters
-ros:
-  global_frame: map
-  robot_base_frame_suffix: /base_link
+    stations:
+      a:
+        names: [station_a1, station_a2, station_a3]
+        station_a1:
+          x: 1.0
+          y: 0.0
+          online: true
+        station_a2:
+          x: 2.0
+          y: 1.5
+          online: true
+        station_a3:
+          x: 1.5
+          y: 2.5
+          online: true
+      b:
+        names: [station_b1, station_b2, station_b3]
+        station_b1:
+          x: 5.0
+          y: 2.0
+          online: true
+        station_b2:
+          x: 6.0
+          y: 3.5
+          online: true
+        station_b3:
+          x: 5.5
+          y: 1.0
+          online: false
+      c:
+        names: [station_c1, station_c2, station_c3]
+        station_c1:
+          x: 10.0
+          y: 5.0
+          online: true
+        station_c2:
+          x: 11.0
+          y: 6.5
+          online: true
+        station_c3:
+          x: 10.5
+          y: 3.5
+          online: true
