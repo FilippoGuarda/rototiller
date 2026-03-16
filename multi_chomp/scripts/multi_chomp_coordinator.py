@@ -138,6 +138,8 @@ class FleetCoordinator(Node):
         
         self.new_plan_buffer.pop(robot_name, None)
         self.pending_plan_requests.discard(robot_name)
+        self.active_paths.pop(robot_name, None)
+        self.active_goals.pop(robot_name, None)
 
     def coordination_loop(self):
         if not self.chomp_client.server_is_ready() or self.optimization_in_progress:
@@ -153,11 +155,14 @@ class FleetCoordinator(Node):
                 cy = current_pose.pose.position.y
 
                 # Goal reached check
+                # TODO: this is a problem, if a robot path is recalled it initializes with the same position of old destination
+                # it automatically goes into destination reached, gotta check the path update logic
                 if math.hypot(gx - cx, gy - cy) < 0.35: 
                     self.get_logger().info(f"{name} securely reached its destination.")
                     self.moving_robots.discard(name)
                     self.goals.pop(name, None)
                     self.active_goals.pop(name, None)
+                    self.active_paths.pop(name, None) # TODO: test fix
                     continue
 
                 # Deviation check -> Force Nav2 Replan
