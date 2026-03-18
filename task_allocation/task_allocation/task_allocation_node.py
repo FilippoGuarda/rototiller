@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import math
 import itertools
+import csv
+import os
+import threading
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -60,6 +63,7 @@ class TaskAllocationNode(Node):
         default_battery = float(self.get_parameter('robot_defaults.battery_soc').value)
         default_max_range = float(self.get_parameter('robot_defaults.max_range_m').value)
         default_usage = float(self.get_parameter('robot_defaults.usage_index').value)
+        self.log_file_path = str(self.get_parameter('log_file_path').value)
 
         self.reentrant_callback_group = ReentrantCallbackGroup()
         self.graph_callback_group = MutuallyExclusiveCallbackGroup()
@@ -105,6 +109,15 @@ class TaskAllocationNode(Node):
             callback_group=self.reentrant_callback_group
         )
         self.get_logger().info(f"Task Allocation Node initialized. Robots: {self.num_robots}, Update rate: {self.update_rate_hz} Hz")
+
+    def log_to_csv(self, task_id: str, robot_id: str, status: str, duration: float, path: str, message: str):
+        timestamp = self.get_clock().now().nanoseconds / 1e9
+        try:
+            with open(self.log_file_path, mode='a', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow([f"{timestamp:.3f}", task_id, robot_id, status, f"{duration:.2f}", path, message])
+        except Exception as e:
+            self.get_logger().error(f"Failed to write to CSV log: {e}")
 
     def load_station_config(self):
         for stype in ['a', 'b', 'c']:
@@ -330,7 +343,7 @@ class TaskAllocationNode(Node):
 
         return best_robot, best_cost, best_path
 
-    def send_to_station(self, robot_id: int, station_name: str):
+    def send_to_station(self, robot_id: int, station_name: str, log_dispatch: bool = True):
         station = self.stations[station_name]
         msg = PoseStamped()
         msg.header.frame_id = self.global_frame
@@ -340,9 +353,11 @@ class TaskAllocationNode(Node):
         msg.pose.orientation.w = 1.0
         
         self.goal_pubs[robot_id].publish(msg)
-        self.get_logger().info(f"Dispatched robot_{robot_id} to {station_name} via multi_chomp")
+        if log_dispatch:
+            self.get_logger().info(f"Dispatched robot_{robot_id} to {station_name} via multi_chomp")
 
     def update_callback(self):
+        # 1. Check progress on running tasks
         for r in range(1, self.num_robots + 1):
             task_info = self.robot_tasks[r]
             if not task_info:
@@ -350,31 +365,48 @@ class TaskAllocationNode(Node):
 
             path = task_info['path']
             curr_idx = task_info['current_idx']
+            
+            if curr_idx >= len(path):
+                continue
+                
             curr_station_name = path[curr_idx]
             curr_station = self.stations[curr_station_name]
 
             r_pos = self.get_robot_position(r)
             if r_pos:
                 dist = math.hypot(r_pos[0] - curr_station.position[0], r_pos[1] - curr_station.position[1])
+                
                 if dist < 0.75:  
                     self.get_logger().info(f"Robot_{r} securely reached {curr_station_name}. Releasing occupancy.")
                     self.occupied_stations.discard(curr_station_name)
                     
                     task_info['current_idx'] += 1
+                    
                     if task_info['current_idx'] < len(path):
                         next_station = path[task_info['current_idx']]
-                        self.send_to_station(r, next_station)
+                        self.send_to_station(r, next_station, log_dispatch=True)
                     else:
-                        self.get_logger().info(f"Robot_{r} completed task {task_info['task_id']}")
+                        duration = (self.get_clock().now().nanoseconds / 1e9) - task_info['start_time']
+                        self.get_logger().info(f"Robot_{r} completed task {task_info['task_id']} in {duration:.2f}s")
+                        
+                        self.log_to_csv(
+                            task_id=task_info['task_id'],
+                            robot_id=f"robot_{r}",
+                            status="COMPLETED",
+                            duration=duration,
+                            path="->".join(path),
+                            message="Task executed successfully"
+                        )
                         self.robot_tasks[r] = None
+                else:
+                    self.send_to_station(r, curr_station_name, log_dispatch=False)
 
-        if self.task_queue:
+        while self.task_queue:
+            idle_robots = [r for r in range(1, self.num_robots + 1) if self.robot_tasks[r] is None]
+            if not idle_robots:
+                break
+
             self.task_queue.sort(key=lambda x: x.priority, reverse=True)
-            
-            idle_robots = sum(1 for r in range(1, self.num_robots + 1) if self.robot_tasks[r] is None)
-            if idle_robots == 0:
-                return
-
             task = self.task_queue[0]
             robot_id, cost, path = self.allocate_task(task)
 
@@ -385,7 +417,8 @@ class TaskAllocationNode(Node):
                 self.robot_tasks[robot_id] = {
                     'task_id': task.task_id,
                     'path': path,
-                    'current_idx': 0
+                    'current_idx': 0,
+                    'start_time': self.get_clock().now().nanoseconds / 1e9
                 }
                 
                 for s in path:
@@ -395,6 +428,7 @@ class TaskAllocationNode(Node):
                 self.send_to_station(robot_id, path[0])
             else:
                 self.get_logger().warn(f"Task {task.task_id} pending: Evaluating feasible paths, waiting for valid Graph/TF...", throttle_duration_sec=3.0)
+                break
 
 def main(args=None):
     rclpy.init(args=args)

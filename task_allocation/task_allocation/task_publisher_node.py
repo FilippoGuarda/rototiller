@@ -2,44 +2,60 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
+import random
 
 class TaskPublisherNode(Node):
     """
-    ROS 2 node that automatically publishes a multi-station task message 
-    to trigger the allocation system based on launch parameters.
+    ROS 2 node that automatically publishes random multi-station task messages
+    using station types to trigger optimal allocation.
     """
     def __init__(self):
         super().__init__("task_publisher_node")
-        self.publisher = self.create_publisher(String, "tasks", 10)
+        self.publisher = self.create_publisher(String, "/tasks", 10)
         
-        # Declare parameters for the task payload
-        self.declare_parameter("task_id", "task_001")
-        self.declare_parameter("stations", ["stationa1", "stationc1"])
-        self.declare_parameter("priority", 1.0)
-        # TODO: instead of delays check for message availability
-        self.declare_parameter("publish_delay_s", 2.0)
-    
-        delay = self.get_parameter("publish_delay_s").value
+        self.declare_parameter("seed", 42)
+        self.declare_parameter("num_tasks", 10)
+        self.declare_parameter("min_delay_s", 2.0)
+        self.declare_parameter("max_delay_s", 8.0)
+        
+        random.seed(self.get_parameter("seed").value)
+        self.num_tasks = self.get_parameter("num_tasks").value
+        self.min_delay = self.get_parameter("min_delay_s").value
+        self.max_delay = self.get_parameter("max_delay_s").value
+        
+        self.tasks_published = 0
+        self.station_types = ['a', 'b', 'c'] 
+        
+        self.get_logger().info(f"Random task publisher active (Seed: {self.get_parameter('seed').value}).")
+        self.schedule_next()
+
+    def schedule_next(self):
+        if self.tasks_published >= self.num_tasks:
+            self.get_logger().info("All random tasks published.")
+            return
+            
+        delay = random.uniform(self.min_delay, self.max_delay) if self.tasks_published > 0 else 1.0
         self.timer = self.create_timer(delay, self.publish_task)
-        self.get_logger().info(f"Task publisher active. Waiting {delay} seconds before calling task...")
 
     def publish_task(self):
-        # Retrieve parameters
-        task_id = self.get_parameter("task_id").value
-        stations = self.get_parameter("stations").value
-        priority = self.get_parameter("priority").value
+        self.timer.cancel()
+        self.tasks_published += 1
         
-        station_sequence = "|".join(stations)
-        msg_data = f"{task_id},{station_sequence},{priority}"
+        task_id = f"task_{self.tasks_published:03d}"
         
-        # Call the task through a String message
+        # Generate random sequence of 2 to 3 station types
+        path_length = random.randint(2, 3)
+        stations = random.choices(self.station_types, k=path_length)
+        priority = round(random.uniform(1.0, 5.0), 1)
+        
+        msg_data = f"{task_id},{'|'.join(stations)},{priority}"
+        
         msg = String()
         msg.data = msg_data
         self.publisher.publish(msg)
+        self.get_logger().info(f"Published task: {msg_data}")
         
-        self.get_logger().info(f"Successfully published task: {msg_data}")
-        
-        self.timer.cancel()
+        self.schedule_next()
 
 def main(args=None):
     rclpy.init(args=args)
