@@ -272,6 +272,9 @@ class TaskAllocationNode(Node):
 
         W_R_S = {r: {} for r in range(1, self.num_robots + 1)}
         for r in range(1, self.num_robots + 1):
+            if self.robot_tasks[r] is not None:
+                continue
+
             pos = self.get_robot_position(r)
             if pos is None:
                 self.get_logger().warn(f"No TF for robot_{r}; excluding it from allocation.")
@@ -325,6 +328,10 @@ class TaskAllocationNode(Node):
         for r in range(1, self.num_robots + 1):
             if self.robot_tasks[r] is not None:
                 continue 
+
+            # only process if W_R_S[r] populated 
+            if not W_R_S[r]:
+                continue
 
             for path in itertools.product(*groups):
                 if len(set(path)) != len(path):
