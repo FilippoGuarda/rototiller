@@ -22,7 +22,7 @@ find_package(nav_msgs REQUIRED)
 install(
   PROGRAMS
     task_allocation/task_allocation_node.py
-    task_allocation/task_publisher.py
+    task_allocation/task_publisher_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
