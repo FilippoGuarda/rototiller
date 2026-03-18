@@ -10,7 +10,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from rclpy.executors import MultiThreadedExecutor
-from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
 from std_msgs.msg import String
 from geometry_msgs.msg import PoseStamped
 from tf2_ros import Buffer, TransformListener
@@ -62,6 +62,7 @@ class TaskAllocationNode(Node):
         default_usage = float(self.get_parameter('robot_defaults.usage_index').value)
 
         self.reentrant_callback_group = ReentrantCallbackGroup()
+        self.graph_callback_group = MutuallyExclusiveCallbackGroup()
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.robot_states: Dict[int, RobotState] = {
@@ -87,7 +88,7 @@ class TaskAllocationNode(Node):
         self.graph_sub = self.create_subscription(
             MarkerArray, '/skeleton_graph/graph_markers',
             self.graph_callback, qos_profile,
-            callback_group=self.reentrant_callback_group   # Reuse the shared instance
+            callback_group=self.graph_callback_group
         )
         self.task_sub = self.create_subscription(
             String, '/tasks', self.task_callback, 10,
@@ -259,7 +260,13 @@ class TaskAllocationNode(Node):
         W_R_S = {r: {} for r in range(1, self.num_robots + 1)}
         for r in range(1, self.num_robots + 1):
             pos = self.get_robot_position(r)
-            rn = self.find_closest_node(pos[0], pos[1], threshold=float('inf')) if pos else None
+            if pos is None:
+                self.get_logger().warn(f"No TF for robot_{r}; excluding it from allocation.")
+                rn = None
+            else:
+                rn = self.find_closest_node(pos[0], pos[1], threshold=float('inf'))
+                if rn is None:
+                    self.get_logger().warn(f"No graph node near robot_{r} at {pos}; excluding from allocation.")
             robot = self.robot_states[r]
             remaining = robot.battery_soc * robot.max_range_m
 
@@ -396,7 +403,7 @@ def main(args=None):
     executor = MultiThreadedExecutor()
     executor.add_node(node)
     try:
-        executor.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
