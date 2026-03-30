@@ -43,9 +43,11 @@ qtcreator-*
 /planning/src
 
 *~
+*.png
 
 # Emacs
 .#*
 
 # Catkin custom files
 CATKIN_IGNORE
+
