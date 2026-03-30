@@ -283,9 +283,88 @@ def estar_cost_matrix(
 #  Global benchmark driver (fixed n=200, varying R)
 # ================================================================
 
-def run_benchmark(
+# ================================================================
+#  Benchmark 1: vary n, fixed R
+# ================================================================
+
+def run_benchmark_vary_n(
+    node_sizes = (50, 100, 200, 500, 1000, 2000),
+    R_fixed: int = 6,
+    obstacle_prob: float = 0.1,
+    repeats: int = 3,
+):
+    sizes_n = []
+    times_dijkstra = []
+    times_astar = []
+    times_estar = []
+
+    for n in node_sizes:
+        R = R_fixed
+        print(f"\n[VARY n] n = {n}, R = {R} robots / {R} stations")
+        sizes_n.append(n)
+
+        # --- Random connected graph + Dijkstra ---
+        t_dij_total = 0.0
+        for _ in range(repeats):
+            G = make_connected_random_graph(n)
+            nodes = list(G.nodes())
+            chosen = random.sample(nodes, 2 * R)
+            robots = chosen[:R]
+            stations = chosen[R:]
+            _, t_dij = dijkstra_cost_matrix(G, robots, stations)
+            t_dij_total += t_dij
+        t_dij_mean = t_dij_total / repeats
+        times_dijkstra.append(t_dij_mean)
+        print(f"  Dijkstra (graph): {t_dij_mean:.6f} s")
+
+        # --- Metric map 10 x n + A* and E* ---
+        t_astar_total = 0.0
+        t_estar_total = 0.0
+        for _ in range(repeats):
+            while True:
+                grid = make_metric_map(width=n, height=10,
+                                       obstacle_prob=obstacle_prob)
+                G_grid = grid_to_graph(grid)
+                if G_grid.number_of_nodes() < 2 * R:
+                    continue
+                try:
+                    robots_g, stations_g = sample_robots_stations_on_grid(
+                        G_grid, R
+                    )
+                    break
+                except RuntimeError:
+                    continue
+
+            # A*
+            _, t_astar = astar_cost_matrix(G_grid, robots_g, stations_g)
+            t_astar_total += t_astar
+
+            # E*
+            _, t_estar = estar_cost_matrix(grid, robots_g, stations_g)
+            t_estar_total += t_estar
+
+        t_astar_mean = t_astar_total / repeats
+        t_estar_mean = t_estar_total / repeats
+        times_astar.append(t_astar_mean)
+        times_estar.append(t_estar_mean)
+        print(f"  A*  (grid): {t_astar_mean:.6f} s")
+        print(f"  E*  (grid): {t_estar_mean:.6f} s")
+
+    return (
+        np.array(sizes_n),
+        np.array(times_dijkstra),
+        np.array(times_astar),
+        np.array(times_estar),
+    )
+
+
+# ================================================================
+#  Benchmark 2: fixed n, vary R
+# ================================================================
+
+def run_benchmark_vary_R(
     graph_n: int = 200,
-    robot_sizes = (3, 5, 8, 13, 21, 34, 55),
+    robot_sizes = (3, 5, 8, 13, 21, 34),
     obstacle_prob: float = 0.1,
     repeats: int = 3,
 ):
@@ -295,7 +374,7 @@ def run_benchmark(
     times_estar = []
 
     for R in robot_sizes:
-        print(f"\n=== n = {graph_n}, R = {R} robots / {R} stations ===")
+        print(f"\n[VARY R] n = {graph_n}, R = {R} robots / {R} stations")
         sizes_R.append(R)
 
         # --- Random connected graph (n fixed) + Dijkstra ---
@@ -310,7 +389,7 @@ def run_benchmark(
             t_dij_total += t_dij
         t_dij_mean = t_dij_total / repeats
         times_dijkstra.append(t_dij_mean)
-        print(f"Dijkstra (graph): {t_dij_mean:.6f} s (avg over {repeats} runs)")
+        print(f"  Dijkstra (graph): {t_dij_mean:.6f} s")
 
         # --- Metric map 10 x graph_n + A* and E* ---
         t_astar_total = 0.0
@@ -342,8 +421,8 @@ def run_benchmark(
         t_estar_mean = t_estar_total / repeats
         times_astar.append(t_astar_mean)
         times_estar.append(t_estar_mean)
-        print(f"A* (metric grid): {t_astar_mean:.6f} s (avg over {repeats} runs)")
-        print(f"E*  (metric grid): {t_estar_mean:.6f} s (avg over {repeats} runs)")
+        print(f"  A*  (grid): {t_astar_mean:.6f} s")
+        print(f"  E*  (grid): {t_estar_mean:.6f} s")
 
     return (
         np.array(sizes_R),
@@ -353,23 +432,50 @@ def run_benchmark(
     )
 
 
-def plot_results(robot_sizes, t_dij, t_astar, t_estar):
-    plt.figure()
-    plt.plot(robot_sizes, t_dij, marker="o",
-             label="n=200 graph + Dijkstra (NetworkX)")
-    plt.plot(robot_sizes, t_astar, marker="s",
-             label="10×200 grid + A* (NetworkX)")
-    plt.plot(robot_sizes, t_estar, marker="^",
-             label="10×200 grid + E* (LSM)")
+# ================================================================
+#  Side-by-side plots
+# ================================================================
 
-    plt.xlabel("Number of robots / stations R")
-    plt.ylabel("Time to fill R×R cost matrix [s]")
-    plt.xscale("log")
-    plt.yscale("log")
-    plt.grid(True, which="both", ls="--", alpha=0.5)
-    plt.legend()
-    plt.title("Cost-matrix computation time vs R (fixed n = 200)")
-    plt.tight_layout()
+def plot_side_by_side(
+    n_vals, t_dij_n, t_astar_n, t_estar_n,
+    R_vals, t_dij_R, t_astar_R, t_estar_R,
+    fixed_R_for_n: int,
+    fixed_n_for_R: int,
+):
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Left: vary n, fixed R
+    ax1.plot(n_vals, t_dij_n, marker="o",
+             label=f"graph + Dijkstra (R={fixed_R_for_n})")
+    ax1.plot(n_vals, t_astar_n, marker="s",
+             label=f"10×n grid + A* (R={fixed_R_for_n})")
+    ax1.plot(n_vals, t_estar_n, marker="^",
+             label=f"10×n grid + E* (R={fixed_R_for_n})")
+    ax1.set_xlabel("Number of graph nodes n")
+    ax1.set_ylabel("Time to fill R×R cost matrix [s]")
+    ax1.set_xscale("log")
+    ax1.set_yscale("log")
+    ax1.grid(True, which="both", ls="--", alpha=0.5)
+    ax1.set_title(f"Scaling vs n (R={fixed_R_for_n})")
+    ax1.legend()
+
+    # Right: vary R, fixed n
+    ax2.plot(R_vals, t_dij_R, marker="o",
+             label=f"graph n={fixed_n_for_R} + Dijkstra")
+    ax2.plot(R_vals, t_astar_R, marker="s",
+             label=f"10×{fixed_n_for_R} grid + A*")
+    ax2.plot(R_vals, t_estar_R, marker="^",
+             label=f"10×{fixed_n_for_R} grid + E*")
+    ax2.set_xlabel("Number of robots / stations R")
+    ax2.set_ylabel("Time to fill R×R cost matrix [s]")
+    ax2.set_xscale("log")
+    ax2.set_yscale("log")
+    ax2.grid(True, which="both", ls="--", alpha=0.5)
+    ax2.set_title(f"Scaling vs R (n={fixed_n_for_R})")
+    ax2.legend()
+
+    fig.suptitle("Cost-matrix computation: Dijkstra vs A* vs E*")
+    fig.tight_layout()
     plt.show()
 
 
@@ -377,5 +483,30 @@ if __name__ == "__main__":
     random.seed(0)
     np.random.seed(0)
 
-    R_vals, t_dij, t_astar, t_estar = run_benchmark()
-    plot_results(R_vals, t_dij, t_astar, t_estar)
+    # Benchmark 1: vary n, fixed R
+    node_sizes = (50, 100, 200, 500, 1000, 2000)
+    R_fixed = 6
+    n_vals, t_dij_n, t_astar_n, t_estar_n = run_benchmark_vary_n(
+        node_sizes=node_sizes,
+        R_fixed=R_fixed,
+        obstacle_prob=0.1,
+        repeats=3,
+    )
+
+    # Benchmark 2: fixed n, vary R
+    fixed_n = 200
+    robot_sizes = (3, 5, 8, 13, 21, 34)
+    R_vals, t_dij_R, t_astar_R, t_estar_R = run_benchmark_vary_R(
+        graph_n=fixed_n,
+        robot_sizes=robot_sizes,
+        obstacle_prob=0.1,
+        repeats=3,
+    )
+
+    # Side-by-side figure
+    plot_side_by_side(
+        n_vals, t_dij_n, t_astar_n, t_estar_n,
+        R_vals, t_dij_R, t_astar_R, t_estar_R,
+        fixed_R_for_n=R_fixed,
+        fixed_n_for_R=fixed_n,
+    )
