@@ -135,11 +135,8 @@ class FleetCoordinator(Node):
         self.get_logger().info(f"Goal received for {robot_name}")
         self.goals[robot_name] = msg
         self.moving_robots.add(robot_name)
-        
         self.new_plan_buffer.pop(robot_name, None)
         self.pending_plan_requests.discard(robot_name)
-        self.active_paths.pop(robot_name, None)
-        self.active_goals.pop(robot_name, None)
 
     def coordination_loop(self):
         if not self.chomp_client.server_is_ready() or self.optimization_in_progress:

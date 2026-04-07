@@ -461,7 +461,7 @@ class TaskAllocationNode(Node):
             curr_idx: int = task_info["current_idx"]
             if curr_idx >= len(path):
                 continue
-                
+
             curr_station_name = path[curr_idx]
             curr_station = self.stations[curr_station_name]
 
@@ -479,11 +479,11 @@ class TaskAllocationNode(Node):
                     )
 
                     self.occupied_stations.discard(curr_station_name)
-                    
-                    task_info['current_idx'] += 1
-                    
-                    if task_info['current_idx'] < len(path):
-                        next_station = path[task_info['current_idx']]
+
+                    task_info["current_idx"] += 1
+
+                    if task_info["current_idx"] < len(path):
+                        next_station = path[task_info["current_idx"]]
                         self.send_to_station(r, next_station, log_dispatch=True)
                     else:
                         now_sec = self.get_clock().now().nanoseconds / 1e9
@@ -513,8 +513,6 @@ class TaskAllocationNode(Node):
                         )
 
                         self.robot_tasks[r] = None
-                else:
-                    self.send_to_station(r, curr_station_name, log_dispatch=False)
 
         while self.task_queue:
             idle_robots = [
@@ -540,17 +538,20 @@ class TaskAllocationNode(Node):
                     f"(Cost: {cost:.2f}, Path: {' -> '.join(path)})"
                 )
 
+                now_sec = self.get_clock().now().nanoseconds / 1e9
+
                 self.robot_tasks[robot_id] = {
-                    'task_id': task.task_id,
-                    'path': path,
-                    'current_idx': 0,
-                    'start_time': self.get_clock().now().nanoseconds / 1e9
+                    "task_id": task.task_id,
+                    "path": path,
+                    "current_idx": 0,
+                    "start_time": now_sec,
                 }
-                
+
                 for s in path:
                     self.occupied_stations.add(s)
-                    
+
                 self.robot_states[robot_id].usage_index += 1.0
+
                 self.logger.log(
                     TaskLogRecord(
                         timestamp=now_sec,
@@ -566,6 +567,7 @@ class TaskAllocationNode(Node):
                         message="Task assigned to robot",
                     )
                 )
+
                 self.send_to_station(robot_id, path[0], log_dispatch=True)
 
                 assigned_any = True
@@ -574,7 +576,7 @@ class TaskAllocationNode(Node):
             if not assigned_any:
                 self.get_logger().warn(
                     "No feasible assignment for any pending task with current Graph/TF/occupancies.",
-                    throttle_duration_sec=3.0
+                    throttle_duration_sec=3.0,
                 )
                 break
 

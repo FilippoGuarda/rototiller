@@ -15,6 +15,7 @@ find_package(Eigen3 REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(nav_msgs REQUIRED)        
 find_package(rosidl_default_generators REQUIRED) 
+find_package(tf2 REQUIRED) 
 find_package(tf2_ros REQUIRED) 
 find_package(tf2_geometry_msgs REQUIRED)
 
@@ -79,14 +80,13 @@ target_include_directories(multi_chomp_action_server_original PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 
-target_link_libraries(multi_chomp_action_server_original  ${OpenCV_LIBRARIES})
-
 target_link_libraries(multi_chomp_action_server_original
-  multi_chomp_original_node
+  ${OpenCV_LIBRARIES}
   "${cpp_typesupport_target}"
 )
 
-install(TARGETS multi_chomp_action_server
+install(TARGETS
+  multi_chomp_action_server
   multi_chomp_action_server_original
   DESTINATION lib/${PROJECT_NAME}
 )
