@@ -452,6 +452,9 @@ class TaskAllocationNode(Node):
                     self.physical_occupancy.add(s_name)
 
     def update_callback(self):
+        self.update_physical_occupancy()
+        self.update_collision_flags()
+
         for r in range(1, self.num_robots + 1):
             task_info = self.robot_tasks[r]
             if not task_info:
