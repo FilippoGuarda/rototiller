@@ -5,7 +5,6 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# add dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
@@ -17,6 +16,7 @@ find_package(OpenCV REQUIRED)
 find_package(nav_msgs REQUIRED)        
 find_package(rosidl_default_generators REQUIRED) 
 find_package(tf2_ros REQUIRED) 
+find_package(tf2_geometry_msgs REQUIRED)
 
 # first we generate required interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -24,6 +24,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   DEPENDENCIES geometry_msgs nav_msgs
 )
 
+ament_export_dependencies(rosidl_default_runtime)
 # create the executables ONCE INTERFACES ARE CREATED OR IT DOES NOT WORK
 add_executable(multi_chomp_action_server
   src/multi_chomp.cpp
@@ -54,9 +55,39 @@ target_link_libraries(multi_chomp_action_server  ${OpenCV_LIBRARIES})
 rosidl_get_typesupport_target(cpp_typesupport_target
   ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
-target_link_libraries(multi_chomp_action_server "${cpp_typesupport_target}")
+target_link_libraries(multi_chomp_action_server
+  "${cpp_typesupport_target}"
+)
+
+add_executable(multi_chomp_action_server_original
+  src/multi_chomp_action_server_original.cpp
+  src/multi_chomp_original.cpp
+)
+
+ament_target_dependencies(multi_chomp_action_server_original
+  rclcpp
+  nav_msgs
+  geometry_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+  OpenCV
+)
+
+target_include_directories(multi_chomp_action_server_original PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(multi_chomp_action_server_original  ${OpenCV_LIBRARIES})
+
+target_link_libraries(multi_chomp_action_server_original
+  multi_chomp_original_node
+  "${cpp_typesupport_target}"
+)
 
 install(TARGETS multi_chomp_action_server
+  multi_chomp_action_server_original
   DESTINATION lib/${PROJECT_NAME}
 )
 

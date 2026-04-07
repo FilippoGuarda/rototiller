@@ -486,10 +486,8 @@ class TaskAllocationNode(Node):
                         next_station = path[task_info['current_idx']]
                         self.send_to_station(r, next_station, log_dispatch=True)
                     else:
-                        duration = (
-                            self.get_clock().now().nanoseconds / 1e9
-                            - task_info["start_time"]
-                        )
+                        now_sec = self.get_clock().now().nanoseconds / 1e9
+                        duration = now_sec - task_info["start_time"]
                         self.get_logger().info(
                             f"Robot_{r} completed task {task_info['task_id']} "
                             f"in {duration:.2f}s"
@@ -500,7 +498,7 @@ class TaskAllocationNode(Node):
 
                         self.logger.log(
                             TaskLogRecord(
-                                timestamp=self.get_clock().now().nanoseconds / 1e9,
+                                timestamp=now_sec,
                                 run_id=self.run_id,
                                 task_id=task_info["task_id"],
                                 robot_id=f"robot_{r}",
