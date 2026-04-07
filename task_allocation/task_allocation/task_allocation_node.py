@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 import math
 import itertools
-import csv
-import os
-import threading
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 
 import networkx as nx
-import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
@@ -18,6 +14,7 @@ from std_msgs.msg import String
 from geometry_msgs.msg import PoseStamped
 from tf2_ros import Buffer, TransformListener
 from visualization_msgs.msg import MarkerArray
+from task_logger import TaskLogger, TaskLogRecord
 
 @dataclass
 class StationConfig:
@@ -63,22 +60,47 @@ class TaskAllocationNode(Node):
         default_battery = float(self.get_parameter('robot_defaults.battery_soc').value)
         default_max_range = float(self.get_parameter('robot_defaults.max_range_m').value)
         default_usage = float(self.get_parameter('robot_defaults.usage_index').value)
-        self.log_file_path = str(self.get_parameter('log_file_path').value)
+
+        if not self.has_parameter("robot_defaults.footprint_radius"):
+            self.declare_parameter("robot_defaults.footprint_radius", 0.5)
+        self.robot_footprint_radius = float(
+            self.get_parameter("robot_defaults.footprint_radius").value
+        )
+
+        self.log_file_path = str(self.get_parameter("log_file_path").value)
+        if not self.has_parameter("run_id"):
+            self.declare_parameter("run_id", "default_run")
+        self.run_id = str(self.get_parameter("run_id").value)
+        self.logger = TaskLogger(self.log_file_path)
 
         self.reentrant_callback_group = ReentrantCallbackGroup()
         self.graph_callback_group = MutuallyExclusiveCallbackGroup()
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.robot_states: Dict[int, RobotState] = {
-            i: RobotState(i, battery_soc=default_battery, max_range_m=default_max_range, usage_index=default_usage)
+            i: RobotState(
+                i,
+                battery_soc=default_battery,
+                max_range_m=default_max_range,
+                usage_index=default_usage,
+            )
             for i in range(1, self.num_robots + 1)
         }
         self.stations: Dict[str, StationConfig] = {}
         self.stations_by_type: Dict[str, List[StationConfig]] = {'a': [], 'b': [], 'c': []}
         self.load_station_config()
+
         self.task_queue: List[Task] = []
-        self.robot_tasks: Dict[int, Optional[dict]] = {i: None for i in range(1, self.num_robots + 1)}
-        self.occupied_stations = set()
+        # Each entry: {
+        #   'task_id', 'path', 'current_idx', 'start_time',
+        #   'had_collision', 'allocation_cost'
+        # }
+        self.robot_tasks: Dict[int, Optional[dict]] = {
+            i: None for i in range(1, self.num_robots + 1)
+        }
+
+        self.occupied_stations: Set[str] = set()  
+        self.physical_occupancy: Set[str] = set() 
         self.graph = nx.Graph()
         self.full_graph = nx.Graph()
         self.graph_nodes_map_coords: Dict[int, Tuple[float, float]] = {}
@@ -87,18 +109,22 @@ class TaskAllocationNode(Node):
         qos_profile = QoSProfile(
             depth=10,
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-            reliability=QoSReliabilityPolicy.RELIABLE
+            reliability=QoSReliabilityPolicy.RELIABLE,
         )
         self.graph_sub = self.create_subscription(
-            MarkerArray, '/skeleton_graph/graph_markers',
+            MarkerArray, "/skeleton_graph/graph_markers",
             self.graph_callback, qos_profile,
-            callback_group=self.graph_callback_group
+            callback_group=self.graph_callback_group,
         )
+
         self.task_sub = self.create_subscription(
-            String, '/tasks', self.task_callback, 10,
-            callback_group=self.reentrant_callback_group
+            String,
+            "/tasks",
+            self.task_callback,
+            10,
+            callback_group=self.reentrant_callback_group,
         )
-        self.goal_pubs = {}
+        self.goal_pubs: Dict[int, rclpy.publisher.Publisher] = {}
         for robot_id in range(1, self.num_robots + 1):
             topic = f"/{self.robot_prefix}{robot_id}/spades_goal"
             self.goal_pubs[robot_id] = self.create_publisher(PoseStamped, topic, 10)
@@ -106,18 +132,13 @@ class TaskAllocationNode(Node):
         self.create_timer(
             1.0 / self.update_rate_hz,
             self.update_callback,
-            callback_group=self.reentrant_callback_group
+            callback_group=self.reentrant_callback_group,
         )
-        self.get_logger().info(f"Task Allocation Node initialized. Robots: {self.num_robots}, Update rate: {self.update_rate_hz} Hz")
 
-    def log_to_csv(self, task_id: str, robot_id: str, status: str, duration: float, path: str, message: str):
-        timestamp = self.get_clock().now().nanoseconds / 1e9
-        try:
-            with open(self.log_file_path, mode='a', newline='') as file:
-                writer = csv.writer(file)
-                writer.writerow([f"{timestamp:.3f}", task_id, robot_id, status, f"{duration:.2f}", path, message])
-        except Exception as e:
-            self.get_logger().error(f"Failed to write to CSV log: {e}")
+        self.get_logger().info(
+            f"Task Allocation Node initialized. Robots: {self.num_robots}, "
+            f"Update rate: {self.update_rate_hz} Hz"
+        )
 
     def load_station_config(self):
         for stype in ['a', 'b', 'c']:
@@ -130,12 +151,17 @@ class TaskAllocationNode(Node):
                 station = StationConfig(sname, stype, (x, y), online)
                 self.stations[sname] = station
                 self.stations_by_type[stype].append(station)
-        self.get_logger().info(f"Loaded stations: A={len(self.stations_by_type['a'])}, B={len(self.stations_by_type['b'])}, C={len(self.stations_by_type['c'])}")
 
+        self.get_logger().info(
+            f"Loaded stations: "
+            f"A={len(self.stations_by_type['a'])}, "
+            f"B={len(self.stations_by_type['b'])}, "
+            f"C={len(self.stations_by_type['c'])}"
+        )
 
     def graph_callback(self, msg: MarkerArray):
-        nodes_marker = next((m for m in msg.markers if 'nodes' in m.ns), None)
-        edges_marker = next((m for m in msg.markers if 'edges' in m.ns), None)
+        nodes_marker = next((m for m in msg.markers if "nodes" in m.ns), None)
+        edges_marker = next((m for m in msg.markers if "edges" in m.ns), None)
 
         if not nodes_marker or not edges_marker:
             return
@@ -152,18 +178,25 @@ class TaskAllocationNode(Node):
         points = edges_marker.points
         for i in range(0, len(points) - 1, 2):
             p1, p2 = points[i], points[i + 1]
-
             n1 = coord_to_idx.get((p1.x, p1.y))
             n2 = coord_to_idx.get((p2.x, p2.y))
 
             if n1 is None:
-                n1 = min(self.graph_nodes_map_coords,
-                        key=lambda k: math.hypot(p1.x - self.graph_nodes_map_coords[k][0],
-                                                p1.y - self.graph_nodes_map_coords[k][1]))
+                n1 = min(
+                    self.graph_nodes_map_coords,
+                    key=lambda k: math.hypot(
+                        p1.x - self.graph_nodes_map_coords[k][0],
+                        p1.y - self.graph_nodes_map_coords[k][1],
+                    ),
+                )
             if n2 is None:
-                n2 = min(self.graph_nodes_map_coords,
-                        key=lambda k: math.hypot(p2.x - self.graph_nodes_map_coords[k][0],
-                                                p2.y - self.graph_nodes_map_coords[k][1]))
+                n2 = min(
+                    self.graph_nodes_map_coords,
+                    key=lambda k: math.hypot(
+                        p2.x - self.graph_nodes_map_coords[k][0],
+                        p2.y - self.graph_nodes_map_coords[k][1],
+                    ),
+                )
 
             if n1 != n2:
                 weight = math.hypot(p2.x - p1.x, p2.y - p1.y)
@@ -189,7 +222,7 @@ class TaskAllocationNode(Node):
             self.full_graph.add_node(virt_id, pos=station.position)
             self.station_nodes[name] = virt_id
 
-            distances = []
+            distances: List[Tuple[float, int]] = []
             for n_id, coords in self.graph_nodes_map_coords.items():
                 d = math.hypot(station.position[0] - coords[0], station.position[1] - coords[1])
                 distances.append((d, n_id))
@@ -198,7 +231,13 @@ class TaskAllocationNode(Node):
             for d, n_id in distances[:self.k_nearest]:
                 self.full_graph.add_edge(virt_id, n_id, weight=d)
 
-    def find_closest_node(self, x: float, y: float, in_full_graph=True, threshold=None) -> Optional[int]:
+    def find_closest_node(
+        self,
+        x: float,
+        y: float,
+        in_full_graph: bool = True,
+        threshold: Optional[float] = None,
+    ) -> Optional[int]:
         best_node = None
         best_dist = float('inf')
         max_dist = threshold if threshold is not None else self.node_match_threshold
@@ -256,7 +295,7 @@ class TaskAllocationNode(Node):
             self.get_logger().warn("Skeleton graph is currently empty or uninitialized!", throttle_duration_sec=2.0)
             return None, float('inf'), []
 
-        groups = []
+        groups: List[List[str]] = []
         for item in task.stations:
             if item in self.stations:
                 groups.append([item])
@@ -270,7 +309,8 @@ class TaskAllocationNode(Node):
             self.get_logger().warn("One or more station groups are empty/offline.")
             return None, float('inf'), []
 
-        W_R_S = {r: {} for r in range(1, self.num_robots + 1)}
+        all_stations = set(itertools.chain(*groups))
+        W_R_S: Dict[int, Dict[str, float]] = {r: {} for r in range(1, self.num_robots + 1)}
         for r in range(1, self.num_robots + 1):
             if self.robot_tasks[r] is not None:
                 continue
@@ -280,15 +320,22 @@ class TaskAllocationNode(Node):
                 self.get_logger().warn(f"No TF for robot_{r}; excluding it from allocation.")
                 rn = None
             else:
-                rn = self.find_closest_node(pos[0], pos[1], threshold=float('inf'))
-                if rn is None:
-                    self.get_logger().warn(f"No graph node near robot_{r} at {pos}; excluding from allocation.")
+                rn = self.find_closest_node(pos[0], pos[1], threshold=float("inf"))
+            if rn is None:
+                self.get_logger().warn(
+                    f"No graph node near robot_{r} at {pos}; excluding from allocation."
+                )
+
             robot = self.robot_states[r]
             remaining = robot.battery_soc * robot.max_range_m
 
-            for s_name in set(itertools.chain(*groups)):
-                if rn is None or s_name in self.occupied_stations:
-                    W_R_S[r][s_name] = float('inf')
+            for s_name in all_stations:
+                if (
+                    rn is None
+                    or s_name in self.occupied_stations
+                    or s_name in self.physical_occupancy
+                ):
+                    W_R_S[r][s_name] = float("inf")
                     continue
                     
                 s_node = self.station_nodes.get(s_name)
@@ -305,38 +352,47 @@ class TaskAllocationNode(Node):
                 except nx.NetworkXNoPath:
                     W_R_S[r][s_name] = float('inf')
 
-        W_S_S = {}
-        for s1 in set(itertools.chain(*groups)):
+        W_S_S: Dict[str, Dict[str, float]] = {}
+        for s1 in all_stations:
             W_S_S[s1] = {}
             n1 = self.station_nodes.get(s1)
-            for s2 in set(itertools.chain(*groups)):
+            for s2 in all_stations:
                 n2 = self.station_nodes.get(s2)
                 if s1 == s2:
                     W_S_S[s1][s2] = 0.0
-                elif n1 is None or n2 is None or s2 in self.occupied_stations:
-                    W_S_S[s1][s2] = float('inf')
+                elif (
+                    n1 is None
+                    or n2 is None
+                    or s2 in self.occupied_stations
+                    or s2 in self.physical_occupancy
+                ):
+                    W_S_S[s1][s2] = float("inf")
                 else:
                     try:
-                        W_S_S[s1][s2] = nx.shortest_path_length(self.full_graph, n1, n2, weight='weight')
+                        W_S_S[s1][s2] = nx.shortest_path_length(
+                            self.full_graph, n1, n2, weight="weight"
+                        )
                     except nx.NetworkXNoPath:
-                        W_S_S[s1][s2] = float('inf')
+                        W_S_S[s1][s2] = float("inf")
 
-        best_cost = float('inf')
-        best_robot = None
-        best_path = []
+        best_cost = float("inf")
+        best_robot: Optional[int] = None
+        best_path: List[str] = []
 
         for r in range(1, self.num_robots + 1):
             if self.robot_tasks[r] is not None:
                 continue 
 
-            # only process if W_R_S[r] populated 
             if not W_R_S[r]:
                 continue
 
             for path in itertools.product(*groups):
                 if len(set(path)) != len(path):
                     continue
-                if any(s in self.occupied_stations for s in path):
+                if any(
+                    (s in self.occupied_stations or s in self.physical_occupancy)
+                    for s in path
+                ):
                     continue
 
                 cost = W_R_S[r][path[0]]
@@ -363,16 +419,50 @@ class TaskAllocationNode(Node):
         if log_dispatch:
             self.get_logger().info(f"Dispatched robot_{robot_id} to {station_name} via multi_chomp")
 
+
+    def update_collision_flags(self):
+        positions: Dict[int, Tuple[float, float]] = {}
+        for r in range(1, self.num_robots + 1):
+            pos = self.get_robot_position(r)
+            if pos is not None:
+                positions[r] = pos
+
+        for r_i, r_j in itertools.combinations(positions.keys(), 2):
+            xi, yi = positions[r_i]
+            xj, yj = positions[r_j]
+            d = math.hypot(xi - xj, yi - yj)
+            if d < 2.0 * self.robot_footprint_radius:
+                if self.robot_tasks[r_i] is not None:
+                    self.robot_tasks[r_i]["had_collision"] = True
+                if self.robot_tasks[r_j] is not None:
+                    self.robot_tasks[r_j]["had_collision"] = True
+
+    def update_physical_occupancy(self):
+        self.physical_occupancy.clear()
+        for r in range(1, self.num_robots + 1):
+            pos = self.get_robot_position(r)
+            if pos is None:
+                continue
+            x, y = pos
+            for s_name, station in self.stations.items():
+                if not station.online:
+                    continue
+                d = math.hypot(x - station.position[0], y - station.position[1])
+                if d < self.robot_footprint_radius:
+                    self.physical_occupancy.add(s_name)
+
     def update_callback(self):
+        self.update_collision_flags()
+        self.update_physical_occupancy()
+
         # 1. Check progress on running tasks
         for r in range(1, self.num_robots + 1):
             task_info = self.robot_tasks[r]
             if not task_info:
                 continue
 
-            path = task_info['path']
-            curr_idx = task_info['current_idx']
-            
+            path: List[str] = task_info["path"]
+            curr_idx: int = task_info["current_idx"]
             if curr_idx >= len(path):
                 continue
                 
@@ -381,10 +471,17 @@ class TaskAllocationNode(Node):
 
             r_pos = self.get_robot_position(r)
             if r_pos:
-                dist = math.hypot(r_pos[0] - curr_station.position[0], r_pos[1] - curr_station.position[1])
-                
-                if dist < 0.75:  
-                    self.get_logger().info(f"Robot_{r} securely reached {curr_station_name}. Releasing occupancy.")
+                dist = math.hypot(
+                    r_pos[0] - curr_station.position[0],
+                    r_pos[1] - curr_station.position[1],
+                )
+
+                if dist < 0.75:
+                    self.get_logger().info(
+                        f"Robot_{r} securely reached {curr_station_name}. "
+                        f"Releasing reservation."
+                    )
+
                     self.occupied_stations.discard(curr_station_name)
                     
                     task_info['current_idx'] += 1
@@ -393,17 +490,34 @@ class TaskAllocationNode(Node):
                         next_station = path[task_info['current_idx']]
                         self.send_to_station(r, next_station, log_dispatch=True)
                     else:
-                        duration = (self.get_clock().now().nanoseconds / 1e9) - task_info['start_time']
-                        self.get_logger().info(f"Robot_{r} completed task {task_info['task_id']} in {duration:.2f}s")
-                        
-                        self.log_to_csv(
-                            task_id=task_info['task_id'],
-                            robot_id=f"robot_{r}",
-                            status="COMPLETED",
-                            duration=duration,
-                            path="->".join(path),
-                            message="Task executed successfully"
+                        duration = (
+                            self.get_clock().now().nanoseconds / 1e9
+                            - task_info["start_time"]
                         )
+                        self.get_logger().info(
+                            f"Robot_{r} completed task {task_info['task_id']} "
+                            f"in {duration:.2f}s"
+                        )
+
+                        collision_flag = 1 if task_info.get("had_collision", False) else 0
+                        allocation_cost = task_info.get("allocation_cost", None)
+
+                        self.logger.log(
+                            TaskLogRecord(
+                                timestamp=self.get_clock().now().nanoseconds / 1e9,
+                                run_id=self.run_id,
+                                task_id=task_info["task_id"],
+                                robot_id=f"robot_{r}",
+                                event="COMPLETED",
+                                status="OK",
+                                allocation_cost=allocation_cost,
+                                duration=duration,
+                                path="->".join(path),
+                                collision_flag=collision_flag,
+                                message="Task executed successfully",
+                            )
+                        )
+
                         self.robot_tasks[r] = None
                 else:
                     self.send_to_station(r, curr_station_name, log_dispatch=False)
@@ -417,25 +531,52 @@ class TaskAllocationNode(Node):
             task = self.task_queue[0]
             robot_id, cost, path = self.allocate_task(task)
 
-            if robot_id is not None and not math.isinf(cost):
+            if robot_id is not None and not math.isinf(cost) and path:
                 self.task_queue.pop(0)
-                self.get_logger().info(f"Assigned task {task.task_id} to robot_{robot_id} (Cost: {cost:.2f}, Path: {' -> '.join(path)})")
-                
+
+                self.get_logger().info(
+                    f"Assigned task {task.task_id} to robot_{robot_id} "
+                    f"(Cost: {cost:.2f}, Path: {' -> '.join(path)})"
+                )
+
+                now_sec = self.get_clock().now().nanoseconds / 1e9
                 self.robot_tasks[robot_id] = {
-                    'task_id': task.task_id,
-                    'path': path,
-                    'current_idx': 0,
-                    'start_time': self.get_clock().now().nanoseconds / 1e9
+                    "task_id": task.task_id,
+                    "path": path,
+                    "current_idx": 0,
+                    "start_time": now_sec,
+                    "had_collision": False,
+                    "allocation_cost": cost,
                 }
                 
                 for s in path:
                     self.occupied_stations.add(s)
                     
                 self.robot_states[robot_id].usage_index += 1.0
-                self.send_to_station(robot_id, path[0])
+                self.logger.log(
+                    TaskLogRecord(
+                        timestamp=now_sec,
+                        run_id=self.run_id,
+                        task_id=task.task_id,
+                        robot_id=f"robot_{robot_id}",
+                        event="ASSIGNED",
+                        status="OK",
+                        allocation_cost=cost,
+                        duration=None,
+                        path="->".join(path),
+                        collision_flag=0,
+                        message="Task assigned to robot",
+                    )
+                )
+                self.send_to_station(robot_id, path[0], log_dispatch=True)
             else:
-                self.get_logger().warn(f"Task {task.task_id} pending: Evaluating feasible paths, waiting for valid Graph/TF...", throttle_duration_sec=3.0)
+                self.get_logger().warn(
+                    f"Task {task.task_id} pending: Evaluating feasible paths, "
+                    f"waiting for valid Graph/TF...",
+                    throttle_duration_sec=3.0,
+                )
                 break
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -449,7 +590,7 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

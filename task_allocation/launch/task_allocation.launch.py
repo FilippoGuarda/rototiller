@@ -14,8 +14,8 @@ def generate_launch_description():
     
     # Import config file for task allocation
     stations_config = os.path.join(task_allocation_dir, 'config', 'stations.yaml')
-    # Set file address for logs
-    log_file_path = os.path.join(os.getcwd(), 'task_allocation_log.csv')
+    # Set file address for logs, TODO: CHANGE OURS TO ORIGINAL WHEN TESTING AGAINST EXTENDED SPADES
+    log_file_path = os.path.join(os.getcwd(), 'task_allocation_log_ours.csv')
     
     # launch graph generator and multi chomp before running the task allocation stack
     graph_gen_launch = os.path.join(graph_generator_dir, 'launch', 'graph_generator.launch.py')
@@ -28,13 +28,14 @@ def generate_launch_description():
     graph_gen_launch_include = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(graph_gen_launch)
     )
-    # launch_description.add_action(graph_gen_launch_include)
+    launch_description.add_action(graph_gen_launch_include)
     # ===== MULTI CHOMP =====
     # Multi robot navigation with collision avoidance
     multi_chomp_launch_include = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(multi_chomp_launch)
     )
-    # launch_description.add_action(multi_chomp_launch_include)
+    launch_description.add_action(multi_chomp_launch_include)
+
     task_allocation_node = Node(
         package="task_allocation",
         executable="task_allocation_node.py",
@@ -43,7 +44,11 @@ def generate_launch_description():
         output="screen",
         parameters=[
             stations_config,
-            {'log_file_path': log_file_path}
+            # TODO: CHANGE RUN_ID TO ORIGINAL WHEN TESTING AGAINST EXTENDED SPADES
+            {
+                'log_file_path': log_file_path,
+                'run_id': 'ours',
+            }
         ],
         remappings=[
             ("/skeleton_graph/graph_markers", "/skeleton_graph/graph_markers"),
