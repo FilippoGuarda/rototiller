@@ -452,10 +452,6 @@ class TaskAllocationNode(Node):
                     self.physical_occupancy.add(s_name)
 
     def update_callback(self):
-        self.update_collision_flags()
-        self.update_physical_occupancy()
-
-        # 1. Check progress on running tasks
         for r in range(1, self.num_robots + 1):
             task_info = self.robot_tasks[r]
             if not task_info:
@@ -523,30 +519,34 @@ class TaskAllocationNode(Node):
                     self.send_to_station(r, curr_station_name, log_dispatch=False)
 
         while self.task_queue:
-            idle_robots = [r for r in range(1, self.num_robots + 1) if self.robot_tasks[r] is None]
+            idle_robots = [
+                r for r in range(1, self.num_robots + 1)
+                if self.robot_tasks[r] is None
+            ]
             if not idle_robots:
                 break
 
             self.task_queue.sort(key=lambda x: x.priority, reverse=True)
-            task = self.task_queue[0]
-            robot_id, cost, path = self.allocate_task(task)
 
-            if robot_id is not None and not math.isinf(cost) and path:
-                self.task_queue.pop(0)
+            assigned_any = False
 
+            for idx, task in enumerate(self.task_queue):
+                robot_id, cost, path = self.allocate_task(task)
+
+                if robot_id is None or math.isinf(cost) or not path:
+                    continue
+
+                self.task_queue.pop(idx)
                 self.get_logger().info(
                     f"Assigned task {task.task_id} to robot_{robot_id} "
                     f"(Cost: {cost:.2f}, Path: {' -> '.join(path)})"
                 )
 
-                now_sec = self.get_clock().now().nanoseconds / 1e9
                 self.robot_tasks[robot_id] = {
-                    "task_id": task.task_id,
-                    "path": path,
-                    "current_idx": 0,
-                    "start_time": now_sec,
-                    "had_collision": False,
-                    "allocation_cost": cost,
+                    'task_id': task.task_id,
+                    'path': path,
+                    'current_idx': 0,
+                    'start_time': self.get_clock().now().nanoseconds / 1e9
                 }
                 
                 for s in path:
@@ -569,11 +569,14 @@ class TaskAllocationNode(Node):
                     )
                 )
                 self.send_to_station(robot_id, path[0], log_dispatch=True)
-            else:
+
+                assigned_any = True
+                break
+
+            if not assigned_any:
                 self.get_logger().warn(
-                    f"Task {task.task_id} pending: Evaluating feasible paths, "
-                    f"waiting for valid Graph/TF...",
-                    throttle_duration_sec=3.0,
+                    "No feasible assignment for any pending task with current Graph/TF/occupancies.",
+                    throttle_duration_sec=3.0
                 )
                 break
 

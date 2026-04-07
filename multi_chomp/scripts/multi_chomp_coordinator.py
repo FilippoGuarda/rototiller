@@ -154,16 +154,16 @@ class FleetCoordinator(Node):
                 cx = current_pose.pose.position.x
                 cy = current_pose.pose.position.y
 
-                # Goal reached check
-                # TODO: this is a problem, if a robot path is recalled it initializes with the same position of old destination
-                # it automatically goes into destination reached, gotta check the path update logic
-                if math.hypot(gx - cx, gy - cy) < 0.35: 
-                    self.get_logger().info(f"{name} securely reached its destination.")
-                    self.moving_robots.discard(name)
-                    self.goals.pop(name, None)
-                    self.active_goals.pop(name, None)
-                    self.active_paths.pop(name, None) # TODO: test fix
-                    continue
+                # # Goal reached check
+                # # TODO: this is a problem, if a robot path is recalled it initializes with the same position of old destination
+                # # it automatically goes into destination reached, gotta check the path update logic
+                # if math.hypot(gx - cx, gy - cy) < 0.35: 
+                #     self.get_logger().info(f"{name} securely reached its destination.")
+                #     self.moving_robots.discard(name)
+                #     self.goals.pop(name, None)
+                #     self.active_goals.pop(name, None)
+                #     self.active_paths.pop(name, None) # TODO: test fix
+                #     continue
 
                 # Deviation check -> Force Nav2 Replan
                 first_pose = self.active_paths[name].poses[0].pose.position
@@ -368,7 +368,11 @@ class FleetCoordinator(Node):
         try:
             status = future.result().status
             if status == GoalStatus.STATUS_SUCCEEDED:
-                pass
+                self.get_logger().info(f"{robot_name} securely reached its destination.")
+                self.moving_robots.discard(robot_name)
+                self.goals.pop(robot_name, None)
+                self.active_goals.pop(robot_name, None)
+                self.active_paths.pop(robot_name, None)
             elif status == GoalStatus.STATUS_ABORTED:
                 self.get_logger().warn(f"FollowPath aborted for {robot_name}, keeping as moving")
                 # TODO: set a failure counter / re-request Nav2 global plan if repeated aborts
