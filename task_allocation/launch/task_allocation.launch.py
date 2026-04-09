@@ -15,10 +15,11 @@ def generate_launch_description():
     # Import config file for task allocation
     stations_config = os.path.join(task_allocation_dir, 'config', 'stations.yaml')
     # Set file address for logs, TODO: CHANGE OURS TO ORIGINAL WHEN TESTING AGAINST EXTENDED SPADES
-    log_file_path = os.path.join(os.getcwd(), 'task_allocation_log_ours.csv')
+    log_file_path = os.path.join(os.getcwd(), 'task_allocation_log_original.csv')
     
     # launch graph generator and multi chomp before running the task allocation stack
     graph_gen_launch = os.path.join(graph_generator_dir, 'launch', 'graph_generator.launch.py')
+    # TODO: CHANGE OURS TO ORIGINAL WHEN TESTING AGAINST EXTENDED SPADES
     multi_chomp_launch = os.path.join(multi_chomp_dir, 'launch', 'multi_chomp.launch.py')
     
     launch_description = LaunchDescription()
@@ -34,7 +35,7 @@ def generate_launch_description():
     multi_chomp_launch_include = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(multi_chomp_launch)
     )
-    launch_description.add_action(multi_chomp_launch_include)
+    # launch_description.add_action(multi_chomp_launch_include)
 
     task_allocation_node = Node(
         package="task_allocation",
@@ -47,7 +48,7 @@ def generate_launch_description():
             # TODO: CHANGE RUN_ID TO ORIGINAL WHEN TESTING AGAINST EXTENDED SPADES
             {
                 'log_file_path': log_file_path,
-                'run_id': 'ours',
+                'run_id': 'original',
             }
         ],
         remappings=[

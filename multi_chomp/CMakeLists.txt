@@ -60,39 +60,14 @@ target_link_libraries(multi_chomp_action_server
   "${cpp_typesupport_target}"
 )
 
-add_executable(multi_chomp_action_server_original
-  src/multi_chomp_action_server_original.cpp
-  src/multi_chomp_original.cpp
-)
-
-ament_target_dependencies(multi_chomp_action_server_original
-  rclcpp
-  nav_msgs
-  geometry_msgs
-  tf2
-  tf2_ros
-  tf2_geometry_msgs
-  OpenCV
-)
-
-target_include_directories(multi_chomp_action_server_original PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-)
-
-target_link_libraries(multi_chomp_action_server_original
-  ${OpenCV_LIBRARIES}
-  "${cpp_typesupport_target}"
-)
-
 install(TARGETS
   multi_chomp_action_server
-  multi_chomp_action_server_original
   DESTINATION lib/${PROJECT_NAME}
 )
 
 # python script install
 install(PROGRAMS
+  scripts/multi_chomp_coordinator_original.py
   scripts/multi_chomp_coordinator.py
   DESTINATION lib/${PROJECT_NAME}
 )

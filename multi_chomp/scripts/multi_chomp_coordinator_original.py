@@ -135,19 +135,41 @@ class FleetCoordinator(Node):
 
     def goal_callback(self, msg, robot_name):
         self.get_logger().info(f"Goal received for {robot_name}")
+        # Restart received goals when implementing original algo
+        self.goals = self.active_goals
         self.goals[robot_name] = msg
         self.moving_robots.add(robot_name)
-        self.plan_buffer.pop(robot_name, None)
+        self.plan_buffer.clear()
         self.pending_plan_requests.discard(robot_name)
 
     def coordination_loop(self):
         if not self.chomp_client.server_is_ready() or self.optimization_in_progress:
             return
 
-        # Request Nav2 Plans for robots with pending goals
-        # Using list() iterates safely while dictionary size changes
+        # # Deviation check: Completely recompute if thrown off track
+        # for name in self.robot_names:
+        #     current_pose = self.get_robot_pose(name)
+        #     if name in self.active_paths and name in self.moving_robots and current_pose:
+        #         # Align the active path to the robot's current pose
+        #         self.active_paths[name] = self._clip_path_to_robot(
+        #             self.active_paths[name], current_pose
+        #         )
+        #         cx = current_pose.pose.position.x
+        #         cy = current_pose.pose.position.y
+
+        #         # Deviation check -> Force Nav2 Replan only if robot is truly off-path
+        #         # In the original multi chomp, we purge all buffers and reinstate goals
+        #         first_pose = self.active_paths[name].poses[0].pose.position
+        #         if math.hypot(first_pose.x - cx, first_pose.y - cy) > 0.6:
+        #             self.get_logger().warn(f"Robot {name} deviated heavily. Recomputing path entirely.")
+        #             self.goals = self.active_goals
+        #             self.active_paths.pop(name, None)
+        #             self.plan_buffer.clear()
+        #             self.pending_plan_requests.discard(name)
+
+        # Using list() safely iterates while dictionary size changes
         for name in list(self.goals.keys()):
-            if name not in self.pending_plan_requests:
+            if name not in self.plan_buffer and name not in self.pending_plan_requests:
                 if self.nav2_plan_clients[name].server_is_ready():
                     self.get_logger().info(f"Requesting Global Plan for {name}...")
                     self.pending_plan_requests.add(name)
@@ -218,6 +240,9 @@ class FleetCoordinator(Node):
                 # Clip the stale Nav2 path to eliminate latency rubber-banding
                 path_to_send = self._clip_path_to_robot(self.plan_buffer[name], current_pose)
                 self.active_paths[name] = path_to_send
+            elif name in self.active_paths and name in self.moving_robots:
+                # Empty path -> tells C++ to keep sliding its existing optimized path
+                path_to_send = nav_msgs.msg.Path()
             else:
                 # Stationary obstacle
                 path_to_send = self.create_holding_path(name)
