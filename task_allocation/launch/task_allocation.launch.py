@@ -15,7 +15,7 @@ def generate_launch_description():
     # Import config file for task allocation
     stations_config = os.path.join(task_allocation_dir, 'config', 'stations.yaml')
     # Set file address for logs, TODO: CHANGE OURS TO ORIGINAL WHEN TESTING AGAINST EXTENDED SPADES
-    log_file_path = os.path.join(os.getcwd(), 'task_allocation_log_original.csv')
+    log_file_path = os.path.join(os.getcwd(), 'task_allocation_log_ours.csv')
     
     # launch graph generator and multi chomp before running the task allocation stack
     graph_gen_launch = os.path.join(graph_generator_dir, 'launch', 'graph_generator.launch.py')
@@ -48,7 +48,7 @@ def generate_launch_description():
             # TODO: CHANGE RUN_ID TO ORIGINAL WHEN TESTING AGAINST EXTENDED SPADES
             {
                 'log_file_path': log_file_path,
-                'run_id': 'original',
+                'run_id': 'ours',
             }
         ],
         remappings=[

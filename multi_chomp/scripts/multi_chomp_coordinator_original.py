@@ -34,6 +34,7 @@ class FleetCoordinator(Node):
         self.active_goals = {}   
         self.plan_buffer = {} 
         self.optimization_in_progress = False
+        self.optimize = False
         self.pending_plan_requests = set()
         self.optimizing_plans = []  
 
@@ -141,9 +142,10 @@ class FleetCoordinator(Node):
         self.moving_robots.add(robot_name)
         self.plan_buffer.clear()
         self.pending_plan_requests.discard(robot_name)
+        self.optimize = True
 
     def coordination_loop(self):
-        if not self.chomp_client.server_is_ready() or self.optimization_in_progress:
+        if not self.chomp_client.server_is_ready() or self.optimization_in_progress or not self.optimize:
             return
 
         # # Deviation check: Completely recompute if thrown off track
@@ -194,6 +196,8 @@ class FleetCoordinator(Node):
         if len(robots_with_new_plans_ready) > 0 or len(self.moving_robots) > 0:
              self.trigger_fleet_optimization()
 
+        self.optimize = False
+        
     def nav2_plan_response_callback(self, future, robot_name):
         try:
             goal_handle = future.result()

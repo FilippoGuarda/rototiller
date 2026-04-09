@@ -29,6 +29,8 @@ class Task:
     timestamp: float
     stations: List[str]
     priority: float = 1.0
+    allocation_attempts: int = 0
+    last_attempt_time: float = 0.0
 
 @dataclass
 class RobotState:
@@ -89,6 +91,13 @@ class TaskAllocationNode(Node):
         self.stations: Dict[str, StationConfig] = {}
         self.stations_by_type: Dict[str, List[StationConfig]] = {'a': [], 'b': [], 'c': []}
         self.load_station_config()
+
+        # TODO: add bullshit to the config calls
+        self.max_allocation_attempts = 10
+        self.retry_cooldown_sec = 5.0
+        self.station_reach_radius = 0.9
+        self.station_dwell_time = 1.5
+        self.station_reservation_timeout = 300.0
 
         self.task_queue: List[Task] = []
         # Each entry: {
@@ -452,6 +461,26 @@ class TaskAllocationNode(Node):
                     self.physical_occupancy.add(s_name)
 
     def update_callback(self):
+
+        now_sec = self.get_clock().now().nanoseconds / 1e9
+        for r, task_info in self.robot_tasks.items():
+            if not task_info:
+                continue
+
+            reserved_station = task_info["path"][task_info["current_idx"]]
+            t_res = task_info.get("station_reservation_time", None)
+
+            if t_res is None:
+                continue
+
+            if now_sec - t_res > self.station_reservation_timeout:
+                self.get_logger().warn(
+                    f"Soft-releasing station {reserved_station} "
+                    f"for robot_{r} due to timeout"
+                )
+                self.occupied_stations.discard(reserved_station)
+                task_info["station_reservation_time"] = now_sec
+                
         self.update_physical_occupancy()
         self.update_collision_flags()
 
@@ -475,18 +504,20 @@ class TaskAllocationNode(Node):
                     r_pos[1] - curr_station.position[1],
                 )
 
-                if dist < 0.75:
-                    self.get_logger().info(
-                        f"Robot_{r} securely reached {curr_station_name}. "
-                        f"Releasing reservation."
-                    )
+                if dist < self.station_reach_radius:
 
-                    self.occupied_stations.discard(curr_station_name)
+                    task_info["station_reservation_time"] = now_sec
+                    if task_info["arrival_time"] is None:
+                        task_info["arrival_time"] = now_sec
+                    elif now_sec - task_info["arrival_time"] >= self.station_dwell_time:
 
-                    task_info["current_idx"] += 1
+                        self.occupied_stations.discard(curr_station_name)
+                        task_info["current_idx"] += 1
+                        task_info["arrival_time"] = None
 
                     if task_info["current_idx"] < len(path):
                         next_station = path[task_info["current_idx"]]
+                        self.occupied_stations.add(next_station)
                         self.send_to_station(r, next_station, log_dispatch=True)
                     else:
                         now_sec = self.get_clock().now().nanoseconds / 1e9
@@ -529,9 +560,25 @@ class TaskAllocationNode(Node):
 
             assigned_any = False
 
-            for idx, task in enumerate(self.task_queue):
-                robot_id, cost, path = self.allocate_task(task)
+            now_sec = self.get_clock().now().nanoseconds / 1e9
 
+            for idx, task in enumerate(self.task_queue):
+
+                if now_sec - task.last_attempt_time < self.retry_cooldown_sec:
+                    continue
+
+                task.allocation_attempts += 1
+                task.last_attempt_time = now_sec
+
+                if task.allocation_attempts > self.max_allocation_attempts:
+                    self.get_logger().warn(
+                        f"Dropping task {task.task_id} after "
+                        f"{task.allocation_attempts} failed allocation attempts"
+                    )
+                    self.task_queue.pop(idx)
+                    break
+
+                robot_id, cost, path = self.allocate_task(task)
                 if robot_id is None or math.isinf(cost) or not path:
                     continue
 
@@ -548,6 +595,8 @@ class TaskAllocationNode(Node):
                     "path": path,
                     "current_idx": 0,
                     "start_time": now_sec,
+                    "arrival_time": None,
+                    "station_reservation_time": now_sec,
                 }
 
                 for s in path:

@@ -45,7 +45,7 @@ class TaskPublisherNode(Node):
         
         # Generate random sequence of 2 to 3 station types
         path_length = random.randint(2, 3)
-        stations = random.choices(self.station_types, k=path_length)
+        stations = random.sample(self.station_types, k=path_length)
         priority = round(random.uniform(1.0, 5.0), 1)
         
         msg_data = f"{task_id},{'|'.join(stations)},{priority}"
