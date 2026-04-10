@@ -15,6 +15,7 @@ task_allocation_node:
     # Update rate
     update_rate_hz: 0.5
     use_sim_time: true
+
     
     # Tropical optimization weights
     alpha_distance: 1.0
@@ -34,7 +35,9 @@ task_allocation_node:
     #   - "task_001,stationa1|stationc2,1.0"   (A→C)
     #   - "task_002,stationc1|stationb1,2.0"   (C→B)
     #   - "task_003,stationa1|stationb1|stationc1,1.5"  (A→B→C)
-    
+    retry_cooldown_sec: 10
+    max_allocation_attempts: 5000 
+    station_types: ["a", "b", "c"]
     stations:
       a:
         names: ["stationa1", "stationa2", "stationa3", "stationa4"]
