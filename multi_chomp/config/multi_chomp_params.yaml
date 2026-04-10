@@ -6,5 +6,5 @@ multi_chomp_node:
     eta: 0.5        # learning rate
     lambda: 10.0       # smoothness 
     mu: 100.0          # Obstacle/Collision weight
-    robot_radius: 0.4
+    robot_radius: 0.6
     obstacle_max_dist: 3.0

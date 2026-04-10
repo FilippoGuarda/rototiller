@@ -5,6 +5,7 @@ task_allocation_node:
     global_frame: "map"
     robot_base_frame_prefix: "robot"
     robot_base_frame_suffix: "/base_link"
+    robot_footprint_radius: 0.5
     
     # Graph and node matching
     node_match_threshold_m: 1.5
@@ -23,7 +24,7 @@ task_allocation_node:
     # Robot defaults
     robot_defaults:
       battery_soc: 1.0
-      max_range_m: 10000.0
+      max_range_m: 1000.0
       usage_index: 0.0
     
     # === STATION CONFIGURATION ===

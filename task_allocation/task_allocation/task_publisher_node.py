@@ -11,11 +11,11 @@ class TaskPublisherNode(Node):
     """
     def __init__(self):
         super().__init__("task_publisher_node")
-        self.publisher = self.create_publisher(String, "/tasks", 10)
+        self.publisher = self.create_publisher(String, "/tasks", 30)
         
-        self.declare_parameter("seed", 42)
+        self.declare_parameter("seed", 13)
         self.declare_parameter("num_tasks", 10)
-        self.declare_parameter("min_delay_s", 2.0)
+        self.declare_parameter("min_delay_s", 5.0)
         self.declare_parameter("max_delay_s", 8.0)
         
         random.seed(self.get_parameter("seed").value)
@@ -34,7 +34,7 @@ class TaskPublisherNode(Node):
             self.get_logger().info("All random tasks published.")
             return
             
-        delay = random.uniform(self.min_delay, self.max_delay) if self.tasks_published > 0 else 1.0
+        delay = random.uniform(self.min_delay, self.max_delay) if self.tasks_published > 0.0 else 20.0
         self.timer = self.create_timer(delay, self.publish_task)
 
     def publish_task(self):

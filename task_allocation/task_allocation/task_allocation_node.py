@@ -309,7 +309,13 @@ class TaskAllocationNode(Node):
             if item in self.stations:
                 groups.append([item])
             elif item in self.stations_by_type:
-                groups.append([s.name for s in self.stations_by_type[item] if s.online])
+                groups.append([
+                    s.name
+                    for s in self.stations_by_type[item]
+                    if s.online
+                    and s.name not in self.occupied_stations
+                    and s.name not in self.physical_occupancy
+                ])
             else:
                 self.get_logger().error(f"Unknown station or type: {item}")
                 return None, float('inf'), []
@@ -397,11 +403,6 @@ class TaskAllocationNode(Node):
 
             for path in itertools.product(*groups):
                 if len(set(path)) != len(path):
-                    continue
-                if any(
-                    (s in self.occupied_stations or s in self.physical_occupancy)
-                    for s in path
-                ):
                     continue
 
                 cost = W_R_S[r][path[0]]
