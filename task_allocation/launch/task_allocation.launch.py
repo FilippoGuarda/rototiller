@@ -71,8 +71,9 @@ def generate_launch_description():
             'max_delay_s': 8.0
         }], 
         remappings=[
-            ("/tasks", "/tasks"),
-        ],
+            ('skeleton_graph_json', '/skeleton_graph_json'),
+            ('/tasks', '/tasks'),
+        ]
     )
     launch_description.add_action(task_publisher_node)
     

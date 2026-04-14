@@ -2,6 +2,7 @@
 import math
 import itertools
 import os
+import json
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Set
 
@@ -45,15 +46,9 @@ class TaskAllocationNode(Node):
         self.alpha_b = float(self.get_parameter("alpha_battery").value)
         self.update_rate_hz = float(self.get_parameter("update_rate_hz").value)
 
-        default_battery = float(
-            self.get_parameter("robot_defaults.battery_soc").value
-        )
-        default_max_range = float(
-            self.get_parameter("robot_defaults.max_range_m").value
-        )
-        default_usage = float(
-            self.get_parameter("robot_defaults.usage_index").value
-        )
+        default_battery = float(self.get_parameter("robot_defaults.battery_soc").value)
+        default_max_range = float(self.get_parameter("robot_defaults.max_range_m").value)
+        default_usage = float(self.get_parameter("robot_defaults.usage_index").value)
 
         if not self.has_parameter("robot_defaults.footprint_radius"):
             self.declare_parameter("robot_defaults.footprint_radius", 0.5)
@@ -61,13 +56,24 @@ class TaskAllocationNode(Node):
             self.get_parameter("robot_defaults.footprint_radius").value
         )
 
+        if not self.has_parameter("max_allocation_attempts"):
+            self.declare_parameter("max_allocation_attempts", 40)
+        self.max_allocation_attempts = int(self.get_parameter("max_allocation_attempts").value)
+
+        if not self.has_parameter("retry_cooldown_sec"):
+            self.declare_parameter("retry_cooldown_sec", 5.0)
+        self.retry_cooldown_sec = float(self.get_parameter("retry_cooldown_sec").value)
+        
+        self.station_reach_radius = 0.9
+        self.station_dwell_time = 1.5
+        self.station_reservation_timeout = 300.0
+
         # Logging / run metadata
         base_log_file_path = str(self.get_parameter("log_file_path").value)
         if not self.has_parameter("run_id"):
             self.declare_parameter("run_id", "default_run")
         self.run_id = str(self.get_parameter("run_id").value)
 
-        # New: algorithm type, used only for log file name
         if not self.has_parameter("algorithm_type"):
             self.declare_parameter("algorithm_type", "multi_chomp_original")
         self.algorithm_type = str(self.get_parameter("algorithm_type").value)
@@ -102,23 +108,15 @@ class TaskAllocationNode(Node):
             "a": [],
             "b": [],
             "c": [],
+            "p": [],  # Added parking type
         }
         self.load_station_config()
 
-        # Allocation behavior
-        self.max_allocation_attempts = 3000
-        self.retry_cooldown_sec = 10.0
-        self.station_reach_radius = 0.9
-        self.station_dwell_time = 1.5
-        self.station_reservation_timeout = 300.0
-
         # Task state
         self.task_queue: List[Task] = []
-        # Per-robot current task info dict
         self.robot_tasks: Dict[int, Optional[dict]] = {
             i: None for i in range(1, self.num_robots + 1)
         }
-
         self.occupied_stations: Set[str] = set()
         self.physical_occupancy: Set[str] = set()
 
@@ -135,8 +133,8 @@ class TaskAllocationNode(Node):
         )
 
         self.graph_sub = self.create_subscription(
-            MarkerArray,
-            "/skeleton_graph/graph_markers",
+            String,
+            'skeleton_graph_json',
             self.graph_callback,
             qos_profile,
             callback_group=self.graph_callback_group,
@@ -174,21 +172,17 @@ class TaskAllocationNode(Node):
     # --------------------------------------------------------------------- #
 
     def load_station_config(self) -> None:
-        for stype in ["a", "b", "c"]:
+        for stype in ["a", "b", "c", "p"]:
             names_param = f"stations.{stype}.names"
+            if not self.has_parameter(names_param):
+                continue
+                
             names = list(self.get_parameter(names_param).value)
             for sname in names:
-                x = float(
-                    self.get_parameter(f"stations.{stype}.{sname}.x").value
-                )
-                y = float(
-                    self.get_parameter(f"stations.{stype}.{sname}.y").value
-                )
-                online = bool(
-                    self.get_parameter(
-                        f"stations.{stype}.{sname}.online"
-                    ).value
-                )
+                x = float(self.get_parameter(f"stations.{stype}.{sname}.x").value)
+                y = float(self.get_parameter(f"stations.{stype}.{sname}.y").value)
+                online = bool(self.get_parameter(f"stations.{stype}.{sname}.online").value)
+
                 station = StationConfig(sname, stype, (x, y), online)
                 self.stations[sname] = station
                 self.stations_by_type[stype].append(station)
@@ -197,62 +191,28 @@ class TaskAllocationNode(Node):
             "Loaded stations: "
             f"A={len(self.stations_by_type['a'])}, "
             f"B={len(self.stations_by_type['b'])}, "
-            f"C={len(self.stations_by_type['c'])}"
+            f"C={len(self.stations_by_type['c'])}, "
+            f"P={len(self.stations_by_type['p'])}"
         )
 
     # --------------------------------------------------------------------- #
     # Graph handling
     # --------------------------------------------------------------------- #
 
-    def graph_callback(self, msg: MarkerArray) -> None:
-        nodes_marker = next((m for m in msg.markers if "nodes" in m.ns), None)
-        edges_marker = next((m for m in msg.markers if "edges" in m.ns), None)
+    def graph_callback(self, msg: String) -> None:
+        try:
+            data = json.loads(msg.data)
+            self.graph = nx.node_link_graph(data)
 
-        if not nodes_marker or not edges_marker:
-            return
+            self.graph_nodes_map_coords.clear()
+            for n, d in self.graph.nodes(data=True):
+                if 'pos' in d:
+                    self.graph_nodes_map_coords[n] = (d['pos'][0], d['pos'][1])
 
-        self.graph.clear()
-        self.graph_nodes_map_coords.clear()
-
-        coord_to_idx: Dict[Tuple[float, float], int] = {}
-        for idx, point in enumerate(nodes_marker.points):
-            self.graph.add_node(idx, pos=(point.x, point.y))
-            self.graph_nodes_map_coords[idx] = (point.x, point.y)
-            coord_to_idx[(point.x, point.y)] = idx
-
-        points = edges_marker.points
-        for i in range(0, len(points) - 1, 2):
-            p1, p2 = points[i], points[i + 1]
-            n1 = coord_to_idx.get((p1.x, p1.y))
-            n2 = coord_to_idx.get((p2.x, p2.y))
-
-            if n1 is None:
-                n1 = min(
-                    self.graph_nodes_map_coords,
-                    key=lambda k: math.hypot(
-                        p1.x - self.graph_nodes_map_coords[k][0],
-                        p1.y - self.graph_nodes_map_coords[k][1],
-                    ),
-                )
-            if n2 is None:
-                n2 = min(
-                    self.graph_nodes_map_coords,
-                    key=lambda k: math.hypot(
-                        p2.x - self.graph_nodes_map_coords[k][0],
-                        p2.y - self.graph_nodes_map_coords[k][1],
-                    ),
-                )
-
-            if n1 != n2:
-                weight = math.hypot(p2.x - p1.x, p2.y - p1.y)
-                self.graph.add_edge(n1, n2, weight=weight)
-
-        self.get_logger().info(
-            f"Graph rebuilt: {self.graph.number_of_nodes()} nodes, "
-            f"{self.graph.number_of_edges()} edges"
-        )
-
-        self.inject_stations_to_graph()
+            self.get_logger().debug(f"Graph JSON parsed: {self.graph.number_of_nodes()} nodes, {self.graph.number_of_edges()} edges")
+            self.inject_stations_to_graph()
+        except Exception as e:
+            self.get_logger().error(f"Failed to parse graph JSON: {e}")
 
     def inject_stations_to_graph(self) -> None:
         self.full_graph, self.station_nodes = build_full_graph_with_stations(
@@ -312,7 +272,7 @@ class TaskAllocationNode(Node):
             )
             return (t.transform.translation.x, t.transform.translation.y)
         except Exception as e:
-            self.get_logger().warn(
+            self.get_logger().debug(
                 f"TF lookup failed for {frame}: {e}",
                 throttle_duration_sec=5.0,
             )
@@ -321,19 +281,23 @@ class TaskAllocationNode(Node):
     def task_callback(self, msg: String) -> None:
         parts = [p.strip() for p in msg.data.split(",")]
         if len(parts) < 2:
-            self.get_logger().error(f"Bad task format: {msg.data}")
+            self.get_logger().debug(f"Bad task format: {msg.data}")
             return
 
         task_id = parts[0]
         stations_str = parts[1].split("|")
         priority = float(parts[2]) if len(parts) > 2 else 1.0
+        
+        # Check if parking stations exist and append "p" to the sequence if not already present
+        has_p = "p" in self.stations_by_type and any(s.online for s in self.stations_by_type["p"])
+        if has_p and stations_str[-1] != "p":
+            stations_str.append("p")
 
-        # Optional early validation: tokens must be known station names or types
         valid_tokens = set(self.stations.keys()) | set(
             self.stations_by_type.keys()
         )
         if any(t not in valid_tokens for t in stations_str):
-            self.get_logger().error(
+            self.get_logger().debug(
                 f"Task {task_id} references unknown station/type(s): {stations_str}"
             )
             return
@@ -346,7 +310,7 @@ class TaskAllocationNode(Node):
         )
 
         self.task_queue.append(task)
-        self.get_logger().info(
+        self.get_logger().debug(
             f"Queued task {task_id} for sequence: {' -> '.join(stations_str)}"
         )
 
@@ -358,7 +322,7 @@ class TaskAllocationNode(Node):
         self, task: Task
     ) -> Tuple[Optional[int], float, List[str]]:
         if not self.full_graph.nodes:
-            self.get_logger().warn(
+            self.get_logger().debug(
                 "Skeleton graph is currently empty or uninitialized!",
                 throttle_duration_sec=2.0,
             )
@@ -379,23 +343,22 @@ class TaskAllocationNode(Node):
                     ]
                 )
             else:
-                self.get_logger().error(f"Unknown station or type: {item}")
+                self.get_logger().debug(f"Unknown station or type: {item}")
                 return None, float("inf"), []
 
         if any(not g for g in groups):
-            self.get_logger().warn(
+            self.get_logger().debug(
                 f"Task {task.task_id}: some station groups empty/offline "
                 f"(tokens: {task.stations})"
             )
             return None, float("inf"), []
 
-        # Optional: cap combination explosion
         max_combinations = 10000
         total_combinations = 1
         for g in groups:
             total_combinations *= len(g)
             if total_combinations > max_combinations:
-                self.get_logger().warn(
+                self.get_logger().debug(
                     f"Task {task.task_id}: too many station combinations "
                     f"({total_combinations}), skipping allocation."
                 )
@@ -403,26 +366,25 @@ class TaskAllocationNode(Node):
 
         all_stations = set(itertools.chain(*groups))
 
-        # Robot -> station cost
         W_R_S: Dict[int, Dict[str, float]] = {
             r: {} for r in range(1, self.num_robots + 1)
         }
         for r in range(1, self.num_robots + 1):
-            if self.robot_tasks[r] is not None:
+            task_info = self.robot_tasks[r]
+            # Skip if robot is busy with a non-parking task
+            if task_info is not None and not task_info.get("is_parking", False):
                 continue
 
             pos = self.get_robot_position(r)
             if pos is None:
-                self.get_logger().warn(
-                    f"No TF for robot_{r}; excluding it from allocation."
-                )
+                self.get_logger().debug(f"No TF for robot_{r}; excluding it from allocation.")
                 rn = None
             else:
                 rn = self.find_closest_node(
                     pos[0], pos[1], threshold=float("inf")
                 )
                 if rn is None:
-                    self.get_logger().warn(
+                    self.get_logger().debug(
                         f"No graph node near robot_{r} at {pos}; "
                         f"excluding from allocation."
                     )
@@ -459,7 +421,6 @@ class TaskAllocationNode(Node):
                 except nx.NetworkXNoPath:
                     W_R_S[r][s_name] = float("inf")
 
-        # Station -> station costs
         W_S_S: Dict[str, Dict[str, float]] = {}
         for s1 in all_stations:
             W_S_S[s1] = {}
@@ -488,8 +449,10 @@ class TaskAllocationNode(Node):
         best_path: List[str] = []
 
         for r in range(1, self.num_robots + 1):
-            if self.robot_tasks[r] is not None:
+            task_info = self.robot_tasks[r]
+            if task_info is not None and not task_info.get("is_parking", False):
                 continue
+                
             if not W_R_S[r]:
                 continue
 
@@ -525,7 +488,7 @@ class TaskAllocationNode(Node):
 
         self.goal_pubs[robot_id].publish(msg)
         if log_dispatch:
-            self.get_logger().info(
+            self.get_logger().debug(
                 f"Dispatched robot_{robot_id} to {station_name} via multi_chomp"
             )
 
@@ -565,7 +528,6 @@ class TaskAllocationNode(Node):
     def update_callback(self) -> None:
         now_sec = self.get_clock().now().nanoseconds / 1e9
 
-        # Handle reservation timeout for current stations
         for r, task_info in self.robot_tasks.items():
             if not task_info:
                 continue
@@ -576,7 +538,7 @@ class TaskAllocationNode(Node):
                 continue
 
             if now_sec - t_res > self.station_reservation_timeout:
-                self.get_logger().warn(
+                self.get_logger().debug(
                     f"Soft-releasing station {reserved_station} "
                     f"for robot_{r} due to timeout"
                 )
@@ -586,7 +548,6 @@ class TaskAllocationNode(Node):
         self.update_physical_occupancy()
         self.update_collision_flags()
 
-        # Check robots progressing along their assigned paths
         for r in range(1, self.num_robots + 1):
             task_info = self.robot_tasks[r]
             if not task_info:
@@ -624,20 +585,23 @@ class TaskAllocationNode(Node):
                             self.send_to_station(
                                 r, next_station, log_dispatch=True
                             )
+                            
+                            # Mark as parking if this is the last leg and it's a 'p' station
+                            if task_info["current_idx"] == len(path) - 1 and self.stations[next_station].station_type == "p":
+                                task_info["is_parking"] = True
                         else:
-                            # Task completed
-                            now_sec = (
-                                self.get_clock()
-                                .now()
-                                .nanoseconds
-                                / 1e9
-                            )
+                            now_sec = self.get_clock().now().nanoseconds / 1e9
                             duration = now_sec - task_info["start_time"]
+                            
                             self.get_logger().info(
                                 f"Robot_{r} completed task "
                                 f"{task_info['task_id']} "
                                 f"in {duration:.2f}s"
                             )
+                            
+                            # CRITICAL FIX: Safely discard all stations in the path to prevent starvation
+                            for s in path:
+                                self.occupied_stations.discard(s)
 
                             collision_flag = 1 if task_info.get(
                                 "had_collision", False
@@ -663,17 +627,16 @@ class TaskAllocationNode(Node):
                             )
                             self.robot_tasks[r] = None
 
-        # Allocate tasks to idle robots
         while self.task_queue:
+            # Idle robots include those doing nothing AND those currently executing a preemptable parking leg
             idle_robots = [
-                r
-                for r in range(1, self.num_robots + 1)
-                if self.robot_tasks[r] is None
+                r for r in range(1, self.num_robots + 1)
+                if self.robot_tasks[r] is None or self.robot_tasks[r].get("is_parking", False)
             ]
+            
             if not idle_robots:
                 break
 
-            # Highest-priority first
             self.task_queue.sort(key=lambda x: x.priority, reverse=True)
 
             assigned_any = False
@@ -683,14 +646,40 @@ class TaskAllocationNode(Node):
                 if now_sec - task.last_attempt_time < self.retry_cooldown_sec:
                     continue
 
-                task.allocation_attempts += 1
-                task.last_attempt_time = now_sec
+                is_impossible = False
+                valid_groups = []
+                
+                for item in task.stations:
+                    if item in self.stations:
+                        valid_groups.append([item])
+                    elif item in self.stations_by_type:
+                        online_stations = [s.name for s in self.stations_by_type[item] if s.online]
+                        if not online_stations:
+                            is_impossible = True
+                            break
+                        valid_groups.append(online_stations)
+                    else:
+                        is_impossible = True
+                        break
+
+                if is_impossible:
+                    self.get_logger().warn(f"Dropping task {task.task_id}: Invalid or offline stations.")
+                    self.task_queue.pop(idx)
+                    break
+
+                is_blocked = False
+                for g in valid_groups:
+                    if all(s in self.occupied_stations or s in self.physical_occupancy for s in g):
+                        is_blocked = True
+                        break
+
+
+                if not is_blocked:
+                    task.allocation_attempts += 1
+                    task.last_attempt_time = now_sec
 
                 if task.allocation_attempts > self.max_allocation_attempts:
-                    self.get_logger().warn(
-                        f"Dropping task {task.task_id} after "
-                        f"{task.allocation_attempts} failed allocation attempts"
-                    )
+                    self.get_logger().warn(f"Dropping task {task.task_id} after {task.allocation_attempts} failed route attempts.")
                     self.task_queue.pop(idx)
                     break
 
@@ -699,12 +688,40 @@ class TaskAllocationNode(Node):
                     continue
 
                 self.task_queue.pop(idx)
+                
+                # Handle preemption if robot was parking
+                if self.robot_tasks[robot_id] is not None:
+                    old_task = self.robot_tasks[robot_id]
+                    # Free remaining stations for the cancelled task
+                    for s in old_task["path"][old_task["current_idx"]:]:
+                        self.occupied_stations.discard(s)
+                        
+                    # Slightly adjust usage index down since it was preempted
+                    self.robot_states[robot_id].usage_index = max(0.0, self.robot_states[robot_id].usage_index - 1.0)
+                    
+                    self.logger.log(
+                        TaskLogRecord(
+                            timestamp=now_sec,
+                            run_id=self.run_id,
+                            task_id=old_task["task_id"],
+                            robot_id=f"robot_{robot_id}",
+                            event="CANCELLED",
+                            status="PREEMPTED",
+                            allocation_cost=old_task.get("allocation_cost"),
+                            duration=now_sec - old_task["start_time"],
+                            path="->".join(old_task["path"]),
+                            collision_flag=int(old_task.get("had_collision", False)),
+                            message="Parking preempted by new task",
+                        )
+                    )
+                
                 self.get_logger().info(
                     f"Assigned task {task.task_id} to robot_{robot_id} "
                     f"(Cost: {cost:.2f}, Path: {' -> '.join(path)})"
                 )
 
                 now_sec = self.get_clock().now().nanoseconds / 1e9
+                is_parking = (len(path) == 1 and self.stations[path[0]].station_type == "p")
 
                 self.robot_tasks[robot_id] = {
                     "task_id": task.task_id,
@@ -715,6 +732,7 @@ class TaskAllocationNode(Node):
                     "station_reservation_time": now_sec,
                     "allocation_cost": cost,
                     "had_collision": False,
+                    "is_parking": is_parking,
                 }
 
                 for s in path:
@@ -743,7 +761,7 @@ class TaskAllocationNode(Node):
                 break
 
             if not assigned_any:
-                self.get_logger().warn(
+                self.get_logger().debug(
                     "No feasible assignment for any pending task with current "
                     "Graph/TF/occupancies.",
                     throttle_duration_sec=3.0,
