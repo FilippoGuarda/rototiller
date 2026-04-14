@@ -56,10 +56,8 @@ class TaskPublisherNode(Node):
         task_id = f"task_{self.tasks_published:03d}"
         
         # Generate random sequence of 2 to 3 station types
-        if len(self.station_types) >= 3:
-            path_length = random.randint(2, 3)
-        elif len(self.station_types) == 2:
-            path_length = 2
+        if len(self.station_types) >= 2:
+            path_length = random.randint(1, 2)
         else:
             path_length = 1
 

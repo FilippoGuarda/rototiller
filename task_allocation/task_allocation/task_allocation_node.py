@@ -350,16 +350,24 @@ class TaskAllocationNode(Node):
             # 1. Determine Tails
             robot_tails = {}
             for r in range(1, self.num_robots + 1):
-                if self.robot_tasks[r] is not None:
-                    if self.robot_tasks[r].get("is_parking", False):
-                        pos = self.get_robot_position(r)
-                        robot_tails[r] = self.find_closest_node(pos[0], pos[1]) if pos else None
-                    else:
-                        last_station = self.robot_tasks[r]['path'][-1]
-                        robot_tails[r] = self.station_nodes.get(last_station)
+                task_info = self.robot_tasks[r]
+
+                if task_info is not None and not task_info.get('is_parking', False):
+                    last_station = task_info['path'][-1]
+                    robot_tails[r] = self.station_nodes.get(last_station)
+
                 else:
                     pos = self.get_robot_position(r)
-                    robot_tails[r] = self.find_closest_node(pos[0], pos[1]) if pos else None
+                    if pos:
+                        best, best_dist = None, float('inf')
+                        for nid, coords in self.graph_nodes_map_coords.items():
+                            d = math.hypot(pos[0] - coords[0], pos[1] - coords[1])
+                            if d < best_dist:
+                                best_dist, best = d, nid
+                        robot_tails[r] = best
+                    else:
+                        robot_tails[r] = None
+                        self.get_logger().warn(f'Robot {r}: no TF position available, excluded from allocation')
 
             # 2. Parse Combinations
             groups = []
@@ -420,7 +428,10 @@ class TaskAllocationNode(Node):
             station_usage_vars = {}
             for (r, c_idx), var in x.items():
                 path = combinations[c_idx]
-                if any(s in self.occupied_stations or s in self.physical_occupancy for s in path):
+                if any((s in self.occupied_stations or s in self.physical_occupancy)
+                    and self.physical_occupancy.get(s) != r
+                    for s in path
+                ):
                     solver.Add(var == 0)
                     continue
 
@@ -613,48 +624,43 @@ class TaskAllocationNode(Node):
                     r_pos[0] - curr_station.position[0],
                     r_pos[1] - curr_station.position[1],
                 )
-
                 if dist < self.station_reach_radius:
                     task_info["station_reservation_time"] = now_sec
-                    if task_info["arrival_time"] is None:
-                        task_info["arrival_time"] = now_sec
-                    elif (now_sec - task_info["arrival_time"]) >= self.station_dwell_time:
+                    if task_info['arrival_time'] is None:
+                        task_info['arrival_time'] = now_sec       
+                    elif now_sec - task_info['arrival_time'] > self.station_dwell_time:
                         if curr_idx + 1 < len(path):
                             next_station = path[curr_idx + 1]
-
+                            
+                            self.occupied_stations.discard(curr_station_name)
+                            
                             occupant = self.physical_occupancy.get(next_station)
                             if occupant is not None and occupant != r:
-                                continue 
-
+                                continue
                             if next_station in self.occupied_stations:
                                 continue
-
+                            
                             self.occupied_stations.add(next_station)
                             self.send_to_station(r, next_station, log_dispatch=True)
-
-                            self.occupied_stations.discard(curr_station_name)
-                            task_info["current_idx"] += 1
-                            task_info["arrival_time"] = None
-
-                            if task_info["current_idx"] == len(path) - 1 and self.stations[next_station].station_type == "p":
-                                task_info["is_parking"] = True
+                            task_info['current_idx'] += 1
+                            task_info['arrival_time'] = None
+                            if task_info['current_idx'] == len(path) - 1 \
+                                    and self.stations[next_station].station_type == 'p':
+                                task_info['is_parking'] = True
                         else:
                             self.occupied_stations.discard(curr_station_name)
-                            task_info["current_idx"] += 1
-                            task_info["arrival_time"] = None
-                # else:
-                #     if int(now_sec) % 3 == 0:
-                #         self.send_to_station(r, curr_station_name, log_dispatch=False)
+                            task_info['current_idx'] += 1
+                            task_info['arrival_time'] = None
 
         # Batch Processor with Starvation Fix
-        idle_robots = [
-            r for r in range(1, self.num_robots + 1)
-            if self.robot_tasks[r] is None or self.robot_tasks[r].get("is_parking", False)
-        ]
+        idle_robots = [r for r in range(1, self.num_robots + 1)
+                if self.robot_tasks[r] is None or self.robot_tasks[r].get('is_parking', False)]
 
-        if len(self.task_queue) >= self.task_batch_size or (len(self.task_queue) > 0 and idle_robots):
+        # Fire as long as there is work AND capacity — don't wait for a full batch
+        if self.task_queue and idle_robots:
             batch_size = min(len(self.task_queue), self.task_batch_size)
             batch = self.task_queue[:batch_size]
+            self.task_queue = self.task_queue[batch_size:]
             self.task_queue = self.task_queue[batch_size:]
 
             successfully_assigned_ids = self.allocate_task_batch(batch)
