@@ -13,7 +13,7 @@ task_allocation_node:
     station_connection_distance: 3.0 
     
     # Update rate
-    update_rate_hz: 0.5
+    update_rate_hz: 1.0
     use_sim_time: true
 
     
@@ -21,6 +21,7 @@ task_allocation_node:
     alpha_distance: 1.0
     alpha_usage: 0.5
     alpha_battery: 2.0
+    task_allocation_batch_size: 3
     
     # Robot defaults
     robot_defaults:

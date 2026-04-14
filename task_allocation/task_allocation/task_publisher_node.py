@@ -15,8 +15,8 @@ class TaskPublisherNode(Node):
 
         self.declare_parameter("seed", 13)
         self.declare_parameter("num_tasks", 10)
-        self.declare_parameter("min_delay_s", 5.0)
-        self.declare_parameter("max_delay_s", 8.0)
+        self.declare_parameter("min_delay_s", 0.5)
+        self.declare_parameter("max_delay_s", 1.0)
         # NEW: declare station_types with a default
         self.declare_parameter("station_types", ["a", "b", "c"])
 
@@ -45,7 +45,7 @@ class TaskPublisherNode(Node):
         delay = (
             random.uniform(self.min_delay, self.max_delay)
             if self.tasks_published > 0
-            else 20.0
+            else 5.0
         )
         self.timer = self.create_timer(delay, self.publish_task)
 
