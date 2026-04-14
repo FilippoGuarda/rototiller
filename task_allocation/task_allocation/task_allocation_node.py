@@ -278,6 +278,52 @@ class TaskAllocationNode(Node):
             )
             return None
 
+
+    def print_status_table(self):
+        os.system('cls' if os.name == 'nt' else 'clear')
+
+        print("\n" + "="*90)
+        print(f" TASK ALLOCATION STATUS | PENDING: {len(self.task_queue)} | ROBOTS: {self.num_robots} ")
+        print("="*90)
+
+        # ACTIVE TASKS TABLE
+        print("\n  [ ACTIVE ROBOT ASSIGNMENTS ]")
+        print(f"  {'ROBOT':<8} | {'TASK ID':<10} | {'LOCATION':<15} | {'COST':<8} | {'STATUS'}")
+        print("  " + "-"*86)
+        for r in range(1, self.num_robots + 1):
+            task_info = self.robot_tasks[r]
+            if task_info is None:
+                print(f"  Robot {r:<2} | {'-':<10} | {'-':<15} | {'-':<8} | IDLE / Waiting for task")
+            else:
+                task_id = task_info['task_id']
+                path = task_info['path']
+                idx = task_info['current_idx']
+                cost = task_info.get('allocation_cost', 0.0)
+                if cost is None: cost = 0.0
+                is_parking = task_info.get('is_parking', False)
+
+                loc = f"{path[idx]} ({idx+1}/{len(path)})"
+
+                if is_parking:
+                    status_str = f"Parking"
+                else:
+                    status_str = f"Executing sequence {'->'.join(path)}"
+
+                print(f"  Robot {r:<2} | {task_id:<10} | {loc:<15} | {float(cost):<8.1f} | {status_str}")
+
+        # PENDING TASKS TABLE
+        print("\n  [ PENDING TASK QUEUE ]")
+        if not self.task_queue:
+            print("  No tasks pending in queue.")
+        else:
+            print(f"  {'PRIORITY':<8} | {'TASK ID':<10} | {'REQUESTED STATIONS':<30} | {'ATTEMPTS'}")
+            print("  " + "-"*86)
+            for t in sorted(self.task_queue, key=lambda x: x.priority, reverse=True):
+                stations_str = "->".join(t.stations)
+                print(f"  {t.priority:<8.1f} | {t.task_id:<10} | {stations_str:<30} | {t.allocation_attempts}/{self.max_allocation_attempts}")
+
+        print("="*90 + "\n")
+
     def task_callback(self, msg: String) -> None:
         parts = [p.strip() for p in msg.data.split(",")]
         if len(parts) < 2:
@@ -679,7 +725,10 @@ class TaskAllocationNode(Node):
                     task.last_attempt_time = now_sec
 
                 if task.allocation_attempts > self.max_allocation_attempts:
-                    self.get_logger().warn(f"Dropping task {task.task_id} after {task.allocation_attempts} failed route attempts.")
+                    self.get_logger().warn(
+                        f"Dropping task {task.task_id} after "
+                        f"{task.allocation_attempts} failed allocation attempts"
+                    )
                     self.task_queue.pop(idx)
                     break
 
@@ -759,6 +808,8 @@ class TaskAllocationNode(Node):
                 self.send_to_station(robot_id, path[0], log_dispatch=True)
                 assigned_any = True
                 break
+
+            self.print_status_table()
 
             if not assigned_any:
                 self.get_logger().debug(

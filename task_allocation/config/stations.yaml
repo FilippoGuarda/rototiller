@@ -25,7 +25,7 @@ task_allocation_node:
     # Robot defaults
     robot_defaults:
       battery_soc: 1.0
-      max_range_m: 1000.0
+      max_range_m: 10000.0
       usage_index: 0.0
     
     # === STATION CONFIGURATION ===
@@ -59,7 +59,7 @@ task_allocation_node:
           online: true
       
       b:
-        names: ["stationb1", "stationb2", "stationb3"]
+        names: ["stationb1", "stationb2", "stationb3", "stationb4", "stationb5"]
         stationb1:
           x: 5.0
           y: -10.0
@@ -71,6 +71,14 @@ task_allocation_node:
         stationb3:
           x: 5.0
           y: -8.0
+          online: false
+        stationb4:
+          x: 5.0
+          y: -7.0
+          online: false
+        stationb5:
+          x: 5.0
+          y: -6.0
           online: false
       
       c:
@@ -87,10 +95,14 @@ task_allocation_node:
           x: -5.0
           y: -13.0
           online: true
+        stationc4:
+          x: -5.0
+          y: -12.0
+          online: true
 
 
       p:
-        names: ["stationp1", "stationp2", "stationp3"]
+        names: ["stationp1", "stationp2", "stationp3", "stationp4", "stationp5", "stationp6"]
         stationp1:
           x: -5.0
           y: -27.0
@@ -102,4 +114,16 @@ task_allocation_node:
         stationp3:
           x: 3.5
           y: -27.0
+          online: true
+        stationp4:
+          x: -5.0
+          y: -26.0
+          online: true
+        stationp5:
+          x: -1.5
+          y: -26.0
+          online: true
+        stationp6:
+          x: 3.5
+          y: -26.0
           online: true
