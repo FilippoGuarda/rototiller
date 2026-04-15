@@ -114,24 +114,26 @@ class TaskAllocationNode(Node):
             "c": [],
             "p": [],
         }
+
         self.load_station_config()
-        
+
         parking_stations = sorted(
             s.name for s in self.stations_by_type["p"] if s.online
         )
+
         assert len(parking_stations) >= self.num_robots
 
-        self.robot_parking_station = {
+        self.robot_parking_station: Dict[int, str] = {
             r: parking_stations[r - 1]
             for r in range(1, self.num_robots + 1)
         }
-
 
         # Task state
         self.task_queue: List[Task] = []
         self.robot_tasks: Dict[int, Optional[dict]] = {
             i: None for i in range(1, self.num_robots + 1)
         }
+
         self.occupied_stations: Set[str] = set()
         self.physical_occupancy: Dict[str, int] = {}
 
@@ -181,6 +183,10 @@ class TaskAllocationNode(Node):
             f"Update rate: {self.update_rate_hz} Hz, "
             f"Log file: {self.log_file_path}"
         )
+
+        # Log the fixed parking assignment at startup for traceability
+        for r, ps in self.robot_parking_station.items():
+            self.get_logger().info(f"  Robot {r} -> fixed home parking: {ps}")
 
     def load_station_config(self) -> None:
         for stype in ["a", "b", "c", "p"]:
@@ -262,7 +268,7 @@ class TaskAllocationNode(Node):
         return best_node
 
     # --------------------------------------------------------------------- #
-    # Robot pose and task reception
+    # Robot pose
     # --------------------------------------------------------------------- #
 
     def get_robot_position(
@@ -274,9 +280,12 @@ class TaskAllocationNode(Node):
                 self.global_frame, frame, rclpy.time.Time()
             )
             return (t.transform.translation.x, t.transform.translation.y)
-        except Exception as e:
+        except Exception:
             return None
 
+    # --------------------------------------------------------------------- #
+    # Status display
+    # --------------------------------------------------------------------- #
     def print_status_table(self):
         os.system('cls' if os.name == 'nt' else 'clear')
         print("\n" + "="*90)
@@ -288,7 +297,7 @@ class TaskAllocationNode(Node):
         for r in range(1, self.num_robots + 1):
             task_info = self.robot_tasks[r]
             if task_info is None:
-                print(f"  Robot {r:<2} | {'-':<10} | {'-':<15} | {'-':<8} | IDLE / Waiting for task")
+                print(f" Robot {r:<2} | {'-':<10} | {'-':<15} | {'-':<8} | IDLE / Waiting for task")
             else:
                 task_id = task_info['task_id']
                 path = task_info['path']
@@ -300,7 +309,7 @@ class TaskAllocationNode(Node):
                 loc = f"{path[idx]} ({idx+1}/{len(path)})" if idx < len(path) else f"DONE"
 
                 if is_parking:
-                    status_str = f"Parking"
+                    status_str = f"Parking @ {self.robot_parking_station[r]}"
                 else:
                     status_str = f"Executing sequence {'->'.join(path)}"
 
@@ -318,6 +327,11 @@ class TaskAllocationNode(Node):
 
         print("="*90 + "\n")
 
+    # --------------------------------------------------------------------- #
+    # Task reception home parking is handled by
+    #      _dispatch_home_parking(), not by injecting it into every task.
+    # --------------------------------------------------------------------- #
+
     def task_callback(self, msg: String) -> None:
         parts = [p.strip() for p in msg.data.split(",")]
         if len(parts) < 2:
@@ -327,9 +341,6 @@ class TaskAllocationNode(Node):
         stations_str = parts[1].split("|")
         priority = float(parts[2]) if len(parts) > 2 else 1.0
 
-        has_p = "p" in self.stations_by_type and any(s.online for s in self.stations_by_type["p"])
-        if has_p and stations_str[-1] != "p":
-            stations_str.append("p")
 
         valid_tokens = set(self.stations.keys()) | set(self.stations_by_type.keys())
         if any(t not in valid_tokens for t in stations_str):
@@ -343,6 +354,56 @@ class TaskAllocationNode(Node):
             priority=priority,
         )
         self.task_queue.append(task)
+
+    # --------------------------------------------------------------------- #
+    # Home parking dispatch — bypasses optimizer entirely
+    #      without going through allocate_task_batch().
+    # --------------------------------------------------------------------- #
+
+    def _dispatch_home_parking(self, robot_id: int) -> None:
+        """Send robot directly to its designated home parking station.
+
+        This method enforces the invariant that robot_id always parks at
+        robot_parking_station[robot_id]. It is called when robot_tasks[r]
+        is None (robot has no task), bypassing the SCIP optimizer entirely
+        so no cost-based reassignment can ever route a robot to the wrong spot.
+        """
+        if self.robot_tasks[robot_id] is not None:
+            return
+
+        park_station = self.robot_parking_station[robot_id]
+
+        # If robot is already physically at its home parking, nothing to do.
+        if self.physical_occupancy.get(park_station) == robot_id:
+            return
+
+        # If home parking is occupied by another robot, log and wait.
+        if park_station in self.occupied_stations:
+            occupant = self.physical_occupancy.get(park_station)
+            if occupant is not None and occupant != robot_id:
+                self.get_logger().warn(
+                    f"Robot {robot_id} home parking {park_station} is physically "
+                    f"occupied by robot {occupant}. Waiting."
+                )
+            return
+
+        now_sec = self.get_clock().now().nanoseconds / 1e9
+        self.robot_tasks[robot_id] = {
+            'task_id': f'park_{robot_id}',
+            'path': [park_station],
+            'current_idx': 0,
+            'start_time': now_sec,
+            'arrival_time': None,
+            'station_reservation_time': now_sec,
+            'allocation_cost': 0.0,
+            'had_collision': False,
+            'is_parking': True, 
+        }
+        self.occupied_stations.add(park_station)
+        self.send_to_station(robot_id, park_station, log_dispatch=True)
+        self.get_logger().info(
+            f"Robot {robot_id} dispatched to fixed home parking: {park_station}"
+        )
 
     # --------------------------------------------------------------------- #
     # OR-Tools Batch Allocation Logic
@@ -385,10 +446,14 @@ class TaskAllocationNode(Node):
                         robot_tails[r] = best
                     else:
                         robot_tails[r] = None
-                        self.get_logger().warn(f'Robot {r}: no TF position available, excluded from allocation')
+                        self.get_logger().warn(
+                            f'Robot {r}: no TF position available, excluded from allocation'
+                        )
 
             # 2. Parse Combinations
-            
+            x = {}
+            costs = {}
+
             for r in eligible_robots:
                 groups = []
                 for item in task.stations:
@@ -400,19 +465,14 @@ class TaskAllocationNode(Node):
                     elif item in self.stations:
                         groups.append([item])
                     elif item in self.stations_by_type:
-                        groups.append([s.name for s in self.stations_by_type[item]
-                            if s.online])
+                        groups.append([s.name for s in self.stations_by_type[item] if s.online])
 
                 if any(not g for g in groups):
                     continue
 
                 combinations = list(itertools.product(*groups))
 
-            x = {}
-            costs = {}
-
-            # 3. Build Matrices
-            for r in eligible_robots:
+                # 3. Build cost matrix, enforcing parking station constraint
                 tail_node = robot_tails.get(r)
                 if tail_node is None:
                     continue
@@ -421,6 +481,15 @@ class TaskAllocationNode(Node):
                 remaining = robot.battery_soc * robot.max_range_m
 
                 for c_idx, path in enumerate(combinations):
+
+                    parking_violation = any(
+                        self.stations[sname].station_type == "p"
+                        and sname != self.robot_parking_station[r]
+                        for sname in path
+                    )
+                    if parking_violation:
+                        continue
+
                     try:
                         first_station = path[0]
                         target_node = self.station_nodes.get(first_station)
@@ -449,7 +518,7 @@ class TaskAllocationNode(Node):
                         costs[(r, c_idx)] = cost
 
                     except (nx.NetworkXNoPath, nx.NodeNotFound):
-                        continue 
+                        continue
 
             if not x:
                 continue
@@ -500,7 +569,9 @@ class TaskAllocationNode(Node):
 
                         assigned_task_ids.add(task.task_id)
 
-                        # Cancel parking if needed
+                        # When when preempting a parking task, preserve the parking
+                        # station identity — the robot will return to its own spot
+                        # via _dispatch_home_parking() after completing the new task.
                         if self.robot_tasks[r] is not None and self.robot_tasks[r].get("is_parking", False):
                             old_task = self.robot_tasks[r]
                             self.occupied_stations.discard(old_task["path"][0])
@@ -518,7 +589,10 @@ class TaskAllocationNode(Node):
                                     duration=now_sec - old_task["start_time"],
                                     path="->".join(old_task["path"]),
                                     collision_flag=int(old_task.get("had_collision", False)),
-                                    message="Parking preempted by new task",
+                                    message=(
+                                        f"Parking at {old_task['path'][0]} preempted by new task. "
+                                        f"Robot {r} will return to {self.robot_parking_station[r]} on completion."
+                                    ),
                                 )
                             )
                             self.robot_tasks[r] = None # Clear to reassign
@@ -602,6 +676,10 @@ class TaskAllocationNode(Node):
                 if d < self.robot_footprint_radius:
                     self.physical_occupancy[s_name] = r 
 
+    # --------------------------------------------------------------------- #
+    # Main update loop
+    # --------------------------------------------------------------------- #
+
     def update_callback(self) -> None:
         now_sec = self.get_clock().now().nanoseconds / 1e9
 
@@ -613,9 +691,11 @@ class TaskAllocationNode(Node):
                 reserved_station = task_info["path"][task_info["current_idx"]]
                 t_res = task_info.get("station_reservation_time", None)
 
-                if (t_res is not None
+                if (
+                    t_res is not None
                     and task_info["arrival_time"] is not None
-                    and now_sec - t_res > self.station_reservation_timeout):
+                    and now_sec - t_res > self.station_reservation_timeout
+                ):
                     self.occupied_stations.discard(reserved_station)
                     task_info["station_reservation_time"] = now_sec
 
@@ -656,6 +736,7 @@ class TaskAllocationNode(Node):
                 )
                 self.robot_states[r].usage_index = max(0.0, self.robot_states[r].usage_index - 1.0)
                 self.robot_tasks[r] = None
+                self._dispatch_home_parking(r)
                 continue
 
             curr_station_name = path[curr_idx]
@@ -705,9 +786,14 @@ class TaskAllocationNode(Node):
                         task_info["is_parking"] = True
 
 
-        # Batch Processor with Starvation Fix
-        idle_robots = [r for r in range(1, self.num_robots + 1)
-                if self.robot_tasks[r] is None or self.robot_tasks[r].get('is_parking', False)]
+        for r in range(1, self.num_robots + 1):
+            if self.robot_tasks[r] is None:
+                self._dispatch_home_parking(r)
+
+        idle_robots = [
+            r for r in range(1, self.num_robots + 1)
+            if self.robot_tasks[r] is None or self.robot_tasks[r].get('is_parking', False)
+        ]
 
         # Fire as long as there is work AND capacity — don't wait for a full batch
         if self.task_queue and idle_robots:
