@@ -577,25 +577,26 @@ class TaskAllocationNode(Node):
                             self.occupied_stations.discard(old_task["path"][0])
 
                             self.robot_states[r].usage_index = max(0.0, self.robot_states[r].usage_index - 1.0)
-                            self.logger.log(
-                                TaskLogRecord(
-                                    timestamp=now_sec,
-                                    run_id=self.run_id,
-                                    task_id=old_task["task_id"],
-                                    robot_id=f"robot_{r}",
-                                    event="CANCELLED",
-                                    status="PREEMPTED",
-                                    allocation_cost=old_task.get("allocation_cost"),
-                                    duration=now_sec - old_task["start_time"],
-                                    path="->".join(old_task["path"]),
-                                    collision_flag=int(old_task.get("had_collision", False)),
-                                    message=(
-                                        f"Parking at {old_task['path'][0]} preempted by new task. "
-                                        f"Robot {r} will return to {self.robot_parking_station[r]} on completion."
-                                    ),
-                                )
-                            )
-                            self.robot_tasks[r] = None # Clear to reassign
+                            # Uncomment for logging when parking gets preempted
+                            # self.logger.log(
+                            #     TaskLogRecord(
+                            #         timestamp=now_sec,
+                            #         run_id=self.run_id,
+                            #         task_id=old_task["task_id"],
+                            #         robot_id=f"robot_{r}",
+                            #         event="CANCELLED",
+                            #         status="PREEMPTED",
+                            #         allocation_cost=old_task.get("allocation_cost"),
+                            #         duration=now_sec - old_task["start_time"],
+                            #         path="->".join(old_task["path"]),
+                            #         collision_flag=int(old_task.get("had_collision", False)),
+                            #         message=(
+                            #             f"Parking at {old_task['path'][0]} preempted by new task. "
+                            #             f"Robot {r} will return to {self.robot_parking_station[r]} on completion."
+                            #         ),
+                            #     )
+                            # )
+                            self.robot_tasks[r] = None 
 
                         # Process Assignment
                         if self.robot_tasks[r] is None:
@@ -617,21 +618,24 @@ class TaskAllocationNode(Node):
 
                         self.robot_states[r].usage_index += 1.0
 
-                        self.logger.log(
-                            TaskLogRecord(
-                                timestamp=now_sec,
-                                run_id=self.run_id,
-                                task_id=task.task_id,
-                                robot_id=f"robot_{r}",
-                                event="ASSIGNED",
-                                status="OK",
-                                allocation_cost=costs[(r, c_idx)],
-                                duration=None,
-                                path="->".join(selected_path),
-                                collision_flag=0,
-                                message="Task assigned to robot",
+
+                        # Do not log parking tasks
+                        if not is_parking:
+                            self.logger.log(
+                                TaskLogRecord(
+                                    timestamp=now_sec,
+                                    run_id=self.run_id,
+                                    task_id=task.task_id,
+                                    robot_id=f"robot_{r}",
+                                    event="ASSIGNED",
+                                    status="OK",
+                                    allocation_cost=costs[(r, c_idx)],
+                                    duration=None,
+                                    path="->".join(selected_path),
+                                    collision_flag=0,
+                                    message="Task assigned to robot",
+                                )
                             )
-                        )
                         break
         return assigned_task_ids
 
@@ -769,8 +773,8 @@ class TaskAllocationNode(Node):
                     # if occupant is not None and occupant != r:
                     #     continue
 
-                    # if next_station in self.occupied_stations:
-                    #     continue
+                    if next_station in self.occupied_stations:
+                        continue
 
                     self.occupied_stations.add(next_station)
                     self.occupied_stations.discard(curr_station_name)
