@@ -105,26 +105,26 @@ task_allocation_node:
       p:
         names: ["stationp1", "stationp2", "stationp3", "stationp4", "stationp5", "stationp6"]
         stationp1:
-          x: -5.0
-          y: -27.0
+          x: -8.5
+          y: 13.2
           online: true
         stationp2:
-          x: -1.5
-          y: -27.0
+          x: -8.5
+          y: 15.3
           online: true
         stationp3:
-          x: 3.5
-          y: -27.0
+          x: -6.8
+          y: 15.5
           online: true
         stationp4:
-          x: -5.0
-          y: -26.0
+          x: 9.0
+          y: 13.40
           online: true
         stationp5:
-          x: -1.5
-          y: -26.0
+          x: 8.7
+          y: 15.50
           online: true
         stationp6:
-          x: 3.5
-          y: -26.0
+          x: 7.3
+          y: 15.4
           online: true

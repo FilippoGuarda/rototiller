@@ -69,7 +69,6 @@ class TaskAllocationNode(Node):
             self.declare_parameter("retry_cooldown_sec", 5.0)
         self.retry_cooldown_sec = float(self.get_parameter("retry_cooldown_sec").value)
 
-        self.station_reach_radius = 0.9
         self.station_dwell_time = 1.5
         self.station_reservation_timeout = 300.0
 
@@ -116,6 +115,17 @@ class TaskAllocationNode(Node):
             "p": [],
         }
         self.load_station_config()
+        
+        parking_stations = sorted(
+            s.name for s in self.stations_by_type["p"] if s.online
+        )
+        assert len(parking_stations) >= self.num_robots
+
+        self.robot_parking_station = {
+            r: parking_stations[r - 1]
+            for r in range(1, self.num_robots + 1)
+        }
+
 
         # Task state
         self.task_queue: List[Task] = []
@@ -323,6 +333,7 @@ class TaskAllocationNode(Node):
 
         valid_tokens = set(self.stations.keys()) | set(self.stations_by_type.keys())
         if any(t not in valid_tokens for t in stations_str):
+            self.get_logger().error("Task contains invalid station type")
             return
 
         task = Task(
@@ -341,6 +352,13 @@ class TaskAllocationNode(Node):
         sorted_tasks = sorted(tasks, key=lambda x: x.priority, reverse=True)
         now_sec = self.get_clock().now().nanoseconds / 1e9
 
+                
+        eligible_robots = [
+            r for r in range(1, self.num_robots + 1)
+            if self.robot_tasks[r] is None or self.robot_tasks[r].get('is_parking', False)
+        ]
+
+
         for task in sorted_tasks:
             solver = pywraplp.Solver.CreateSolver('SCIP')
             if not solver:
@@ -349,7 +367,7 @@ class TaskAllocationNode(Node):
 
             # 1. Determine Tails
             robot_tails = {}
-            for r in range(1, self.num_robots + 1):
+            for r in eligible_robots:
                 task_info = self.robot_tasks[r]
 
                 if task_info is not None and not task_info.get('is_parking', False):
@@ -370,22 +388,31 @@ class TaskAllocationNode(Node):
                         self.get_logger().warn(f'Robot {r}: no TF position available, excluded from allocation')
 
             # 2. Parse Combinations
-            groups = []
-            for item in task.stations:
-                if item in self.stations:
-                    groups.append([item])
-                elif item in self.stations_by_type:
-                    groups.append([s.name for s in self.stations_by_type[item] if s.online])
+            
+            for r in eligible_robots:
+                groups = []
+                for item in task.stations:
+                    if (
+                        item == "p"
+                        or (item in self.stations and self.stations[item].station_type == "p")
+                    ):
+                        groups.append([self.robot_parking_station[r]])
+                    elif item in self.stations:
+                        groups.append([item])
+                    elif item in self.stations_by_type:
+                        groups.append([s.name for s in self.stations_by_type[item]
+                            if s.online])
 
-            if any(not g for g in groups):
-                continue
+                if any(not g for g in groups):
+                    continue
 
-            combinations = list(itertools.product(*groups))
+                combinations = list(itertools.product(*groups))
+
             x = {}
             costs = {}
 
             # 3. Build Matrices
-            for r in range(1, self.num_robots + 1):
+            for r in eligible_robots:
                 tail_node = robot_tails.get(r)
                 if tail_node is None:
                     continue
@@ -395,22 +422,27 @@ class TaskAllocationNode(Node):
 
                 for c_idx, path in enumerate(combinations):
                     try:
-                        target_node = self.station_nodes.get(path[0])
+                        first_station = path[0]
+                        target_node = self.station_nodes.get(first_station)
+
                         if tail_node not in self.full_graph or target_node not in self.full_graph:
                             continue
 
-                        dist = nx.shortest_path_length(self.full_graph, tail_node, target_node, weight='weight')
+                        dist = nx.shortest_path_length(
+                            self.full_graph, tail_node, target_node, weight='weight'
+                        )
+
                         d_cost = self.alpha_d * dist
                         b_cost = float('inf') if remaining <= 0.0 else self.alpha_b * (dist / remaining)
                         u_cost = self.alpha_u * robot.usage_index
                         cost = d_cost + b_cost + u_cost
 
                         for i in range(len(path) - 1):
-                            s1_node = self.station_nodes.get(path[i])
-                            s2_node = self.station_nodes.get(path[i+1])
-                            if s1_node not in self.full_graph or s2_node not in self.full_graph:
-                                raise nx.NetworkXNoPath
-                            cost += self.alpha_d * nx.shortest_path_length(self.full_graph, s1_node, s2_node, weight='weight')
+                            n1 = self.station_nodes[path[i]]
+                            n2 = self.station_nodes[path[i + 1]]
+                            cost += self.alpha_d * nx.shortest_path_length(
+                                self.full_graph, n1, n2, weight='weight'
+                            )
 
                         var = solver.IntVar(0, 1, f'x_{r}_{c_idx}')
                         x[(r, c_idx)] = var
@@ -428,39 +460,50 @@ class TaskAllocationNode(Node):
             station_usage_vars = {}
             for (r, c_idx), var in x.items():
                 path = combinations[c_idx]
-                if any((s in self.occupied_stations or s in self.physical_occupancy)
-                    and self.physical_occupancy.get(s) != r
-                    for s in path
-                ):
+                first_station = path[0]
+
+                # Check physical occupancy of FIRST station
+                occupant = self.physical_occupancy.get(first_station)
+                if occupant is not None and occupant != r:
                     solver.Add(var == 0)
                     continue
 
-                # Ensure no single combination uses the same station for different parts of the batch to avoid collisions
-                for station in set(path):
-                    if station not in station_usage_vars:
-                        station_usage_vars[station] = []
-                    station_usage_vars[station].append(var)
+                # Check logical reservation of FIRST station
+                if first_station in self.occupied_stations:
+                    solver.Add(var == 0)
+                    continue
 
-            for station, vars_using_station in station_usage_vars.items():
-                if vars_using_station:
-                    solver.Add(solver.Sum(vars_using_station) <= 1)
+                # Register variable for mutual exclusion
+                if first_station not in station_usage_vars:
+                    station_usage_vars[first_station] = []
+                station_usage_vars[first_station].append(var)
 
-            solver.Minimize(solver.Sum([var * costs[key] for key, var in x.items()]))
+            # Enforce exclusivity per first station
+            for first_station, vars_using_station in station_usage_vars.items():
+                solver.Add(solver.Sum(vars_using_station) <= 1)
+
+            solver.Minimize(
+                solver.Sum(var * costs[key] for key, var in x.items())
+            )
+
             status = solver.Solve()
 
-            # 5. Apply Results & Logging
-            if status in [pywraplp.Solver.OPTIMAL, pywraplp.Solver.FEASIBLE]:
+            if status in (pywraplp.Solver.OPTIMAL, pywraplp.Solver.FEASIBLE):
                 for (r, c_idx), var in x.items():
                     if var.solution_value() > 0.5:
                         selected_path = list(combinations[c_idx])
-                        is_parking = (len(selected_path) == 1 and self.stations[selected_path[0]].station_type == "p")
+
+                        is_parking = (
+                            len(selected_path) == 1
+                            and self.stations[selected_path[0]].station_type == "p"
+                        )
+
                         assigned_task_ids.add(task.task_id)
 
-                        # Handle PREEMPTION logging natively
+                        # Cancel parking if needed
                         if self.robot_tasks[r] is not None and self.robot_tasks[r].get("is_parking", False):
                             old_task = self.robot_tasks[r]
-                            for s in old_task["path"][old_task["current_idx"]:]:
-                                self.occupied_stations.discard(s)
+                            self.occupied_stations.discard(old_task["path"][0])
 
                             self.robot_states[r].usage_index = max(0.0, self.robot_states[r].usage_index - 1.0)
                             self.logger.log(
@@ -496,9 +539,7 @@ class TaskAllocationNode(Node):
                             self.occupied_stations.add(selected_path[0])
                             self.send_to_station(r, selected_path[0], log_dispatch=True)
                         else:
-                            self.robot_tasks[r]['path'].extend(selected_path)
-                            self.robot_tasks[r]['allocation_cost'] += costs[(r, c_idx)]
-                            self.robot_tasks[r]['task_id'] = f"{self.robot_tasks[r]['task_id']}+{task.task_id}"
+                            continue
 
                         self.robot_states[r].usage_index += 1.0
 
@@ -541,7 +582,7 @@ class TaskAllocationNode(Node):
             xi, yi = positions[r_i]
             xj, yj = positions[r_j]
             d = math.hypot(xi - xj, yi - yj)
-            if d < 2.0 * self.robot_footprint_radius:
+            if d < 1.8 * self.robot_footprint_radius:
                 if self.robot_tasks[r_i] is not None:
                     self.robot_tasks[r_i]["had_collision"] = True
                 if self.robot_tasks[r_j] is not None:
@@ -571,7 +612,10 @@ class TaskAllocationNode(Node):
             if task_info["current_idx"] < len(task_info["path"]):
                 reserved_station = task_info["path"][task_info["current_idx"]]
                 t_res = task_info.get("station_reservation_time", None)
-                if t_res is not None and now_sec - t_res > self.station_reservation_timeout:
+
+                if (t_res is not None
+                    and task_info["arrival_time"] is not None
+                    and now_sec - t_res > self.station_reservation_timeout):
                     self.occupied_stations.discard(reserved_station)
                     task_info["station_reservation_time"] = now_sec
 
@@ -590,8 +634,7 @@ class TaskAllocationNode(Node):
                 now_sec = self.get_clock().now().nanoseconds / 1e9
                 duration = now_sec - task_info["start_time"]
 
-                for s in path:
-                    self.occupied_stations.discard(s)
+                self.occupied_stations.discard(path[-1])
 
                 collision_flag = 1 if task_info.get("had_collision", False) else 0
 
@@ -624,33 +667,43 @@ class TaskAllocationNode(Node):
                     r_pos[0] - curr_station.position[0],
                     r_pos[1] - curr_station.position[1],
                 )
-                if dist < self.station_reach_radius:
+                if dist < self.robot_footprint_radius:
                     task_info["station_reservation_time"] = now_sec
-                    if task_info['arrival_time'] is None:
-                        task_info['arrival_time'] = now_sec       
-                    elif now_sec - task_info['arrival_time'] > self.station_dwell_time:
-                        if curr_idx + 1 < len(path):
-                            next_station = path[curr_idx + 1]
-                            
+
+                    if task_info["arrival_time"] is None:
+                        task_info["arrival_time"] = now_sec
+                        continue
+
+                    if curr_idx == len(path) - 1:
+                        task_info["current_idx"] += 1
+                        task_info["arrival_time"] = None
+                        if self.stations[curr_station_name].station_type == "p":
                             self.occupied_stations.discard(curr_station_name)
-                            
-                            occupant = self.physical_occupancy.get(next_station)
-                            if occupant is not None and occupant != r:
-                                continue
-                            if next_station in self.occupied_stations:
-                                continue
-                            
-                            self.occupied_stations.add(next_station)
-                            self.send_to_station(r, next_station, log_dispatch=True)
-                            task_info['current_idx'] += 1
-                            task_info['arrival_time'] = None
-                            if task_info['current_idx'] == len(path) - 1 \
-                                    and self.stations[next_station].station_type == 'p':
-                                task_info['is_parking'] = True
-                        else:
-                            self.occupied_stations.discard(curr_station_name)
-                            task_info['current_idx'] += 1
-                            task_info['arrival_time'] = None
+                            task_info["is_parking"] = True
+                        continue
+
+                    next_station = path[curr_idx + 1]
+
+                    # occupant = self.physical_occupancy.get(next_station)
+                    # if occupant is not None and occupant != r:
+                    #     continue
+
+                    # if next_station in self.occupied_stations:
+                    #     continue
+
+                    self.occupied_stations.add(next_station)
+                    self.occupied_stations.discard(curr_station_name)
+
+                    self.send_to_station(r, next_station, log_dispatch=True)
+                    task_info["current_idx"] += 1
+                    task_info["arrival_time"] = None
+
+                    if (
+                        task_info["current_idx"] == len(path) - 1
+                        and self.stations[next_station].station_type == "p"
+                    ):
+                        task_info["is_parking"] = True
+
 
         # Batch Processor with Starvation Fix
         idle_robots = [r for r in range(1, self.num_robots + 1)
@@ -660,7 +713,6 @@ class TaskAllocationNode(Node):
         if self.task_queue and idle_robots:
             batch_size = min(len(self.task_queue), self.task_batch_size)
             batch = self.task_queue[:batch_size]
-            self.task_queue = self.task_queue[batch_size:]
             self.task_queue = self.task_queue[batch_size:]
 
             successfully_assigned_ids = self.allocate_task_batch(batch)
@@ -673,7 +725,7 @@ class TaskAllocationNode(Node):
                 else:
                     self.get_logger().warn(f"Dropping task {t.task_id} after {self.max_allocation_attempts} attempts.")
 
-            self.print_status_table()
+        self.print_status_table()
 
 def main(args=None):
     rclpy.init(args=args)
