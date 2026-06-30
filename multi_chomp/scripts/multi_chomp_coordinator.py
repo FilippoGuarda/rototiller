@@ -25,11 +25,21 @@ class FleetCoordinator(Node):
         self.declare_parameter('max_optimized_segment_length', 0.25)
         self.declare_parameter('stretch_factor', 2.0)
         self.declare_parameter('replan_cooldown_sec', 2.0)
+        self.declare_parameter('stuck_timeout_sec', 5.0)
+        self.declare_parameter('stuck_motion_epsilon', 0.05)
+        self.declare_parameter('stuck_replan_cooldown_sec', 3.0)
+
 
 
         self.robot_count = self.get_parameter('robot_count').value
         self.controller_id = self.get_parameter('controller_id').value
         self.robot_names = [f'robot{i}' for i in range(1, self.robot_count + 1)]
+
+        
+        self.stuck_timeout_sec = self.get_parameter('stuck_timeout_sec').value
+        self.stuck_motion_epsilon = self.get_parameter('stuck_motion_epsilon').value
+        self.stuck_replan_cooldown_sec = self.get_parameter('stuck_replan_cooldown_sec').value
+
         
         self.max_optimized_segment_length = self.get_parameter('max_optimized_segment_length').value
         self.stretch_factor = self.get_parameter('stretch_factor').value
@@ -44,7 +54,12 @@ class FleetCoordinator(Node):
         self.new_plan_buffer = {} 
         self.optimization_in_progress = False
         self.pending_plan_requests = set()
-        self.optimizing_plans = []  
+        self.optimizing_plans = []
+        
+        self.last_robot_pose = {}
+        self.last_motion_time = {}
+        self.last_stuck_replan_time = {}
+
 
         self.active_paths = {}       
         self.moving_robots = set()   
@@ -175,6 +190,107 @@ class FleetCoordinator(Node):
         self.last_forced_replan_time[robot_name] = now_sec
 
         return True
+    
+    # Stuck robot helper functions
+    def _now_sec(self):
+        return self.get_clock().now().nanoseconds / 1e9
+
+
+    def _pose_xy(self, pose):
+        return (
+            pose.pose.position.x,
+            pose.pose.position.y
+        )
+
+
+    def _update_robot_motion_state(self, robot_name, current_pose):
+        """
+        Updates the last time the robot was observed moving.
+
+        A robot is considered moving only if its current position changed by more
+        than stuck_motion_epsilon compared to the previous stored pose.
+        """
+        now = self._now_sec()
+
+        if current_pose is None:
+            return
+
+        if robot_name not in self.last_robot_pose:
+            self.last_robot_pose[robot_name] = current_pose
+            self.last_motion_time[robot_name] = now
+            return
+
+        old_x, old_y = self._pose_xy(self.last_robot_pose[robot_name])
+        new_x, new_y = self._pose_xy(current_pose)
+
+        dist = math.hypot(new_x - old_x, new_y - old_y)
+
+        if dist > self.stuck_motion_epsilon:
+            self.last_motion_time[robot_name] = now
+            self.last_robot_pose[robot_name] = current_pose
+
+
+    def _is_robot_stuck(self, robot_name):
+        """
+        Returns True if robot has not moved enough for stuck_timeout_sec.
+        """
+        if robot_name not in self.last_motion_time:
+            return False
+
+        now = self._now_sec()
+        stopped_duration = now - self.last_motion_time[robot_name]
+
+        return stopped_duration > self.stuck_timeout_sec
+
+
+    def _can_stuck_replan(self, robot_name):
+        """
+        Prevents repeated replans every control loop while the robot is stuck.
+        """
+        now = self._now_sec()
+        last = self.last_stuck_replan_time.get(robot_name, -float('inf'))
+
+        return (now - last) > self.stuck_replan_cooldown_sec
+
+
+    def _force_complete_replan_due_to_stuck(self, robot_name):
+        """
+        Completely discards the current path for this robot and asks Nav2
+        to compute a fresh initialization path from the robot's current pose.
+        """
+        if not self._can_stuck_replan(robot_name):
+            return False
+
+        if robot_name not in self.active_goals and robot_name not in self.goals:
+            self.get_logger().warn(
+                f"{robot_name} seems stuck, but no goal is available for replanning."
+            )
+            return False
+
+        self.get_logger().warn(
+            f"{robot_name} has not moved for more than "
+            f"{self.stuck_timeout_sec:.1f} seconds. Recomputing full path."
+        )
+
+        # Put the current active goal back into the planning queue.
+        if robot_name in self.active_goals:
+            self.goals[robot_name] = self.active_goals[robot_name]
+
+        # Remove old path data.
+        self.active_paths.pop(robot_name, None)
+        self.new_plan_buffer.pop(robot_name, None)
+        self.pending_plan_requests.discard(robot_name)
+
+        # Keep robot marked as moving because it still needs to reach the goal.
+        self.moving_robots.add(robot_name)
+
+        # Reset stuck timer so we do not instantly trigger again.
+        now = self._now_sec()
+        self.last_motion_time[robot_name] = now
+        self.last_stuck_replan_time[robot_name] = now
+
+        return True
+
 
     def get_robot_pose(self, robot_name):
         """Get the current pose of the robot in the map frame."""
@@ -237,29 +353,57 @@ class FleetCoordinator(Node):
             path.poses = path.poses[min_idx:]
         return path
 
+    
     def goal_callback(self, msg, robot_name):
         self.get_logger().info(f"Goal received for {robot_name}")
+
         self.goals[robot_name] = msg
         self.moving_robots.add(robot_name)
+
         self.new_plan_buffer.pop(robot_name, None)
         self.pending_plan_requests.discard(robot_name)
+
+        # Reset stuck detection for this new task.
+        current_pose = self.get_robot_pose(robot_name)
+        now = self._now_sec()
+
+        if current_pose is not None:
+            self.last_robot_pose[robot_name] = current_pose
+
+        self.last_motion_time[robot_name] = now
+        self.last_stuck_replan_time.pop(robot_name, None)
+
 
     def coordination_loop(self):
         if not self.chomp_client.server_is_ready() or self.optimization_in_progress:
             return
 
         # Deviation check: Completely recompute if thrown off track
+            
         for name in self.robot_names:
             current_pose = self.get_robot_pose(name)
+
+            if current_pose:
+                self._update_robot_motion_state(name, current_pose)
+
             if name in self.active_paths and name in self.moving_robots and current_pose:
+                # Check if robot is stuck before doing normal path checks.
+                if self._is_robot_stuck(name):
+                    replanned = self._force_complete_replan_due_to_stuck(name)
+
+                    if replanned:
+                        # Skip the rest of the checks for this robot in this cycle.
+                        continue
+
                 # Align the active path to the robot's current pose
                 self.active_paths[name] = self._clip_path_to_robot(
                     self.active_paths[name], current_pose
                 )
+
                 cx = current_pose.pose.position.x
                 cy = current_pose.pose.position.y
 
-                # # Goal reached check
+                   # # Goal reached check
                 # # TODO: this is a problem, if a robot path is recalled it initializes with the same position of old destination
                 # # it automatically goes into destination reached, gotta check the path update logic
                 # if math.hypot(gx - cx, gy - cy) < 0.35: 
@@ -272,13 +416,20 @@ class FleetCoordinator(Node):
 
                 # Deviation check -> Force Nav2 Replan only if robot is truly off-path
                 first_pose = self.active_paths[name].poses[0].pose.position
+
                 if math.hypot(first_pose.x - cx, first_pose.y - cy) > 0.6:
-                    self.get_logger().warn(f"Robot {name} deviated heavily. Recomputing path entirely.")
+                    self.get_logger().warn(
+                        f"Robot {name} deviated heavily. Recomputing path entirely."
+                    )
                     if name in self.active_goals:
                         self.goals[name] = self.active_goals[name]
+
                     self.active_paths.pop(name, None)
                     self.new_plan_buffer.pop(name, None)
                     self.pending_plan_requests.discard(name)
+
+             
+
 
         # Request Nav2 Plans ONLY for robots with pending goals
         # Using list() safely iterates while dictionary size changes

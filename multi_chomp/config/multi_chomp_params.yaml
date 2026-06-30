@@ -16,3 +16,6 @@ fleet_coordinator:
     max_optimized_segment_length: 0.50
     stretch_factor: 2.0
     replan_cooldown_sec: 2.0
+    stuck_timeout_sec: 5.0
+    stuck_motion_epsilon: 0.05
+    stuck_replan_cooldown_sec: 3.0
