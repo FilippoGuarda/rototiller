@@ -11,7 +11,7 @@ MultiChompNode::MultiChompNode() : Node("multi_chomp_server") {
   start_states_.resize(params_.num_robots, Eigen::Vector2d::Zero());
   goal_states_.resize(params_.num_robots, Eigen::Vector2d::Zero());
 
-  marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("plan_markers", 100);
+  marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("plan_markers", 200);
 
   for(int r = 0; r < params_.num_robots; ++r) {
       path_pubs_.push_back(this->create_publisher<nav_msgs::msg::Path>(
@@ -38,7 +38,7 @@ MultiChompNode::MultiChompNode() : Node("multi_chomp_server") {
 
 void MultiChompNode::load_parameters() {
   this->declare_parameter<int>("num_robots", 6);
-  this->declare_parameter<int>("waypoints_per_robot", 50);
+  this->declare_parameter<int>("waypoints_per_robot", 100);
   this->declare_parameter<double>("dt", 0.1);
   this->declare_parameter<double>("eta", 10000.0);
   this->declare_parameter<double>("lambda", 0.01);
@@ -314,7 +314,7 @@ void MultiChompNode::update_starts_from_tf() {
       int shift_idx = 0;
       double min_dist = std::numeric_limits<double>::infinity();
 
-      int search_horizon = std::min(nq, 50); 
+      int search_horizon = std::min(nq, params_.waypoints_per_robot); 
 
       for (int k = 0; k < search_horizon; ++k) {
           Eigen::Vector2d pt = xi_.block(offset + k * cdim_, 0, cdim_, 1);

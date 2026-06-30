@@ -22,10 +22,19 @@ class FleetCoordinator(Node):
 
         self.declare_parameter('robot_count', 6)
         self.declare_parameter('controller_id', 'FollowPath')
+        self.declare_parameter('max_optimized_segment_length', 0.25)
+        self.declare_parameter('stretch_factor', 2.0)
+        self.declare_parameter('replan_cooldown_sec', 2.0)
+
 
         self.robot_count = self.get_parameter('robot_count').value
         self.controller_id = self.get_parameter('controller_id').value
         self.robot_names = [f'robot{i}' for i in range(1, self.robot_count + 1)]
+        
+        self.max_optimized_segment_length = self.get_parameter('max_optimized_segment_length').value
+        self.stretch_factor = self.get_parameter('stretch_factor').value
+        self.replan_cooldown_sec = self.get_parameter('replan_cooldown_sec').value
+
 
         self.get_logger().info(f"Fleet Coordinator Active: {self.robot_names}")
 
@@ -39,6 +48,9 @@ class FleetCoordinator(Node):
 
         self.active_paths = {}       
         self.moving_robots = set()   
+        self.last_forced_replan_time = {}
+        self.plan_request_seq = {name: 0 for name in self.robot_names}
+
 
         # --- TF Buffer ---
         self.tf_buffer = Buffer()
@@ -69,6 +81,100 @@ class FleetCoordinator(Node):
             )
 
         self.create_timer(0.5, self.coordination_loop, callback_group=self.cb_group)
+
+
+    # Replanning helper functs
+    def _segment_lengths(self, path):
+        """Return distances between consecutive poses in a path."""
+        lengths = []
+
+        if not path or len(path.poses) < 2:
+            return lengths
+
+        for i in range(len(path.poses) - 1):
+            p1 = path.poses[i].pose.position
+            p2 = path.poses[i + 1].pose.position
+            lengths.append(math.hypot(p2.x - p1.x, p2.y - p1.y))
+
+        return lengths
+
+    def _is_path_too_stretched(self, robot_name, optimized_path, reference_path=None):
+        """ Detects whether Multi-CHOMP produced path segments that are too long.
+        This can happen when the costmap changes and the optimizer deforms
+        the path too aggressively instead of producing a clean trajectory."""
+        opt_lengths = self._segment_lengths(optimized_path)
+
+        if not opt_lengths:
+            return False, 0.0, self.max_optimized_segment_length
+
+        max_opt_segment = max(opt_lengths)
+
+        threshold = self.max_optimized_segment_length
+
+        # If we have a reference path, compare against its typical segment length.
+        # This avoids false positives when paths are naturally sampled coarsely.
+        if reference_path is not None:
+            ref_lengths = [
+                d for d in self._segment_lengths(reference_path)
+                if d > 1e-4
+            ]
+
+            if ref_lengths:
+                ref_lengths_sorted = sorted(ref_lengths)
+                median_ref = ref_lengths_sorted[len(ref_lengths_sorted) // 2]
+                threshold = max(
+                    threshold,
+                    self.stretch_factor * median_ref
+                )
+
+        return max_opt_segment > threshold, max_opt_segment, threshold
+
+
+    def _can_force_replan(self, robot_name):
+        """Avoid repeatedly forcing replans every optimization cycle."""
+        now_sec = self.get_clock().now().nanoseconds / 1e9
+        last_sec = self.last_forced_replan_time.get(robot_name, -float('inf'))
+
+        return (now_sec - last_sec) >= self.replan_cooldown_sec
+
+
+    def _force_new_initialization_trajectory(self, robot_name, reason):
+        """
+        Throw away the current optimized path and ask Nav2 for a new initial path.
+        """
+        if not self._can_force_replan(robot_name):
+            self.get_logger().warn(
+                f"Skipping forced replan for {robot_name}: cooldown active."
+            )
+            return False
+
+        if robot_name not in self.active_goals and robot_name not in self.goals:
+            self.get_logger().warn(
+                f"Cannot force replan for {robot_name}: no active goal available."
+            )
+            return False
+
+        self.get_logger().warn(
+            f"Forcing new initialization trajectory for {robot_name}: {reason}"
+        )
+
+        # If the robot already has an active goal, put it back into the planning queue.
+        if robot_name in self.active_goals:
+            self.goals[robot_name] = self.active_goals[robot_name]
+
+        # Invalidate old path state.
+        self.active_paths.pop(robot_name, None)
+        self.new_plan_buffer.pop(robot_name, None)
+        self.pending_plan_requests.discard(robot_name)
+        self.moving_robots.add(robot_name)
+
+        # Invalidate any in-flight Nav2 planning result for this robot.
+        self.plan_request_seq[robot_name] += 1
+
+        now_sec = self.get_clock().now().nanoseconds / 1e9
+        self.last_forced_replan_time[robot_name] = now_sec
+
+        return True
 
     def get_robot_pose(self, robot_name):
         """Get the current pose of the robot in the map frame."""
@@ -186,9 +292,14 @@ class FleetCoordinator(Node):
                     goal_msg.goal = self.goals[name]
                     goal_msg.planner_id = "GridBased"
                     goal_msg.use_start = False 
+                    self.plan_request_seq[name] += 1
+                    request_seq = self.plan_request_seq[name]
 
                     future = self.nav2_plan_clients[name].send_goal_async(goal_msg)
-                    future.add_done_callback(lambda f, n=name: self.nav2_plan_response_callback(f, n))
+                    future.add_done_callback(
+                        lambda f, n=name, seq=request_seq:
+                        self.nav2_plan_response_callback(f, n, seq)
+                    )
 
         # Check Optimization Readiness
         robots_with_new_goals = [r for r in self.goals]
@@ -202,7 +313,7 @@ class FleetCoordinator(Node):
         if len(robots_with_new_plans_ready) > 0 or len(self.moving_robots) > 0:
              self.trigger_fleet_optimization()
 
-    def nav2_plan_response_callback(self, future, robot_name):
+    def nav2_plan_response_callback(self, future, robot_name, request_seq):
         try:
             goal_handle = future.result()
             if not goal_handle.accepted:
@@ -210,13 +321,21 @@ class FleetCoordinator(Node):
                 return
             
             goal_handle.get_result_async().add_done_callback(
-                lambda f, n=robot_name: self.nav2_plan_result_callback(f, n)
+                lambda f, n=robot_name, seq=request_seq:
+                self.nav2_plan_result_callback(f, n, seq)
             )
         except Exception:
             self.pending_plan_requests.discard(robot_name)
 
-    def nav2_plan_result_callback(self, future, robot_name):
+    def nav2_plan_result_callback(self, future, robot_name, request_seq):
+        
         try:
+            if request_seq != self.plan_request_seq[robot_name]:
+                self.get_logger().warn(
+                    f"Ignoring stale Nav2 plan result for {robot_name}"
+                )
+                self.pending_plan_requests.discard(robot_name)
+                return
             result = future.result().result
             if len(result.path.poses) > 0:
                 self.new_plan_buffer[robot_name] = result.path
@@ -304,6 +423,8 @@ class FleetCoordinator(Node):
                 self.optimizing_plans.clear()
                 return
 
+            robots_requiring_replan = set()
+
             for i, robot_name in enumerate(self.robot_names):
                 opt_path = optimized_paths[i]
                 
@@ -311,6 +432,34 @@ class FleetCoordinator(Node):
                     continue
                 
                 if robot_name in self.moving_robots:
+                    reference_path = self.active_paths.get(robot_name)
+
+                    too_stretched, max_segment, threshold = self._is_path_too_stretched(
+                        robot_name,
+                        opt_path,
+                        reference_path
+                    )
+
+                    if too_stretched:
+                        self.get_logger().warn(
+                            f"Optimized path for {robot_name} is too stretched. "
+                            f"Max segment: {max_segment:.3f} m, "
+                            f"threshold: {threshold:.3f} m."
+                        )
+
+                        replanned = self._force_new_initialization_trajectory(
+                            robot_name,
+                            reason=(
+                                f"optimized path segment too long "
+                                f"({max_segment:.3f} m > {threshold:.3f} m)"
+                            )
+                        )
+
+                        if replanned:
+                            robots_requiring_replan.add(robot_name)
+
+                        continue
+
                     self.active_paths[robot_name] = opt_path
                     self.execute_path(robot_name, opt_path)
                 else:
@@ -370,7 +519,7 @@ class FleetCoordinator(Node):
                 self.get_logger().info(f"{robot_name} securely reached its destination.")
 
                 # Only treat as finished if there is no newer goal or active goal.
-                if robot_name not in self.goals and robot_name not in self.active_goals:
+                if robot_name not in self.goals and robot_name not in self.new_plan_buffer:
                     self.moving_robots.discard(robot_name)
                     self.active_goals.pop(robot_name, None)
                     self.active_paths.pop(robot_name, None)

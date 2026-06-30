@@ -35,7 +35,7 @@ def generate_launch_description():
     multi_chomp_launch_include = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(multi_chomp_launch)
     )
-    # launch_description.add_action(multi_chomp_launch_include)
+    launch_description.add_action(multi_chomp_launch_include)
 
     task_allocation_node = Node(
         package="task_allocation",
