@@ -1,12 +1,11 @@
 #ifndef MULTI_CHOMP__MULTI_CHOMP_ORIGINAL_HPP_
 #define MULTI_CHOMP__MULTI_CHOMP_ORIGINAL_HPP_
 
-#include <mutex>
 #include <vector>
-#include <string>
-#include <memory>
-#include <algorithm>
+#include <mutex>
 #include <cmath>
+#include <algorithm>
+#include <limits>
 
 #include <Eigen/Dense>
 #include <opencv2/opencv.hpp>
@@ -32,62 +31,53 @@ struct ChompOriginalParameters {
 
 class MultiChompOriginalNode : public rclcpp::Node {
 public:
-    MultiChompOriginalNode();
+  MultiChompOriginalNode();
 
-    // Load fixed start/goal from Nav2 paths and initialise xi.
-    // Returns false if any path is degenerate.
-    bool set_paths(const std::vector<nav_msgs::msg::Path> & paths);
+  bool set_paths(const std::vector<nav_msgs::msg::Path> & paths);
+  void solve_step();
+  std::vector<nav_msgs::msg::Path> get_paths() const;
 
-    // Execute one full CHOMP gradient step (called by action server).
-    void solve_step();
-
-    // Export current xi as nav_msgs::Path per robot.
-    std::vector<nav_msgs::msg::Path> get_paths() const;
-
-    // Accessors used by action server.
-    bool has_map()      const { return map_received_; }
-    int  get_num_robots() const { return params_.num_robots; }
-    double compute_current_cost() const;
+  bool has_map() const { return map_received_; }
+  int get_num_robots() const { return params_.num_robots; }
+  double compute_current_cost() const;
+  void log_min_signed_distances() const;
 
 private:
-    // ── ROS infrastructure ──────────────────────────────────────────────────
-    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr grid_sub_;
-    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr             path_pub_;   // debug
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr grid_sub_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
 
-    void map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
+  void map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
 
-    // ── Costmap / distance field ────────────────────────────────────────────
-    mutable std::mutex               map_mutex_;
-    nav_msgs::msg::OccupancyGrid     current_map_;
-    bool                             map_received_ = false;
-    cv::Mat dist_map_, dist_grad_x_, dist_grad_y_;
-    float   map_resolution_ = 0.05f;
-    double  map_origin_x_ = 0.0, map_origin_y_ = 0.0;
-    int     map_width_ = 0, map_height_ = 0;
+  mutable std::mutex map_mutex_;
+  nav_msgs::msg::OccupancyGrid current_map_;
+  bool map_received_ = false;
+  cv::Mat dist_map_, dist_grad_x_, dist_grad_y_;
+  float map_resolution_ = 0.05f;
+  double map_origin_x_ = 0.0, map_origin_y_ = 0.0;
+  int map_width_ = 0, map_height_ = 0;
 
-    void   update_distance_map(const nav_msgs::msg::OccupancyGrid & grid);
-    double get_environment_cost(double x, double y, Eigen::Vector2d & grad) const;
+  void update_distance_map(const nav_msgs::msg::OccupancyGrid & grid);
+  double get_environment_cost(double x, double y, Eigen::Vector2d & grad) const;
+  double bilerp(const cv::Mat & m, double u, double v) const;
 
-    // ── CHOMP state ─────────────────────────────────────────────────────────
-    ChompOriginalParameters params_;
+  ChompOriginalParameters params_;
 
-    static constexpr size_t cdim_ = 2;   // config-space dimension (planar)
+  static constexpr size_t cdim_ = 2;
 
-    size_t              xidim_ = 0;       // total trajectory dimension
-    Eigen::VectorXd     xi_;              // stacked trajectory [q1_r0 … qN_r0 | … | q1_rR … qN_rR]
-    Eigen::MatrixXd     AAR_;             // block-diagonal metric
-    Eigen::MatrixXd     AARinv_;          // its inverse
-    Eigen::VectorXd     bbR_;             // acceleration bias (recomputed every step)
+  size_t xidim_ = 0;
+  Eigen::VectorXd xi_;
+  Eigen::MatrixXd AAR_;
+  Eigen::MatrixXd AARinv_;
+  Eigen::VectorXd bbR_;
 
-    std::vector<Eigen::Vector2d> start_states_;  // fixed at set_paths time
-    std::vector<Eigen::Vector2d> goal_states_;   // fixed at set_paths time
+  std::vector<Eigen::Vector2d> start_states_;
+  std::vector<Eigen::Vector2d> goal_states_;
 
-    // ── Helpers ─────────────────────────────────────────────────────────────
-    void   init_matrices();
-    void   load_parameters();
+  void init_matrices();
+  void load_parameters();
 
-    std::vector<Eigen::Vector2d> resample_path(
-        const nav_msgs::msg::Path & path, int n) const;
+  std::vector<Eigen::Vector2d> resample_path(
+    const nav_msgs::msg::Path & path, int n) const;
 };
 
-#endif  // MULTI_CHOMP__MULTI_CHOMP_ORIGINAL_HPP_
+#endif // MULTI_CHOMP__MULTI_CHOMP_ORIGINAL_HPP_
