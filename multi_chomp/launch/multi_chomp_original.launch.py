@@ -52,7 +52,7 @@ def generate_launch_description():
     # multi chomp server
     server_node = Node(
         package='multi_chomp',
-        executable='multi_chomp_action_server',
+        executable='multi_chomp_original_action_server',
         name='multi_chomp_server',
         output='screen',
         parameters=[

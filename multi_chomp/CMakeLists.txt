@@ -33,8 +33,25 @@ add_executable(multi_chomp_action_server
   src/multi_chomp_action_server_main.cpp
 )
 
+add_executable(multi_chomp_original_action_server
+  src/multi_chomp_original.cpp
+  src/multi_chomp_original_action_server.cpp 
+)
+
 # linking libraries
 ament_target_dependencies(multi_chomp_action_server
+  rclcpp
+  rclcpp_action
+  geometry_msgs
+  visualization_msgs
+  nav_msgs
+  Eigen3
+  OpenCV
+  tf2_ros
+)
+
+# linking libraries
+ament_target_dependencies(multi_chomp_original_action_server
   rclcpp
   rclcpp_action
   geometry_msgs
@@ -52,6 +69,13 @@ target_include_directories(multi_chomp_action_server PUBLIC
 
 target_link_libraries(multi_chomp_action_server  ${OpenCV_LIBRARIES})
 
+target_include_directories(multi_chomp_original_action_server PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(multi_chomp_original_action_server  ${OpenCV_LIBRARIES})
+
 # link 
 rosidl_get_typesupport_target(cpp_typesupport_target
   ${PROJECT_NAME} "rosidl_typesupport_cpp")
@@ -62,6 +86,15 @@ target_link_libraries(multi_chomp_action_server
 
 install(TARGETS
   multi_chomp_action_server
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+target_link_libraries(multi_chomp_original_action_server
+  "${cpp_typesupport_target}"
+)
+
+install(TARGETS
+  multi_chomp_original_action_server
   DESTINATION lib/${PROJECT_NAME}
 )
 
