@@ -12,6 +12,10 @@ import tf2_ros
 from tf2_ros import Buffer, TransformListener
 import math
 from rclpy.callback_groups import ReentrantCallbackGroup
+import os
+from datetime import datetime
+
+from task_allocation.task_logger import TaskLogger, TaskLogRecord
 
 
 class FleetCoordinator(Node):
@@ -22,10 +26,21 @@ class FleetCoordinator(Node):
 
         self.declare_parameter('robot_count', 6)
         self.declare_parameter('controller_id', 'FollowPath')
+        self.declare_parameter('logfilepath', os.path.join(os.getcwd(), 'multichomp_metrics.csv'))
+        self.declare_parameter('runid', 'original')
 
         self.robot_count = self.get_parameter('robot_count').value
         self.controller_id = self.get_parameter('controller_id').value
         self.robot_names = [f'robot{i}' for i in range(1, self.robot_count + 1)]
+
+        self.run_id = str(self.get_parameter('runid').value)
+        base_log_path = str(self.get_parameter('logfilepath').value)
+        base, ext = os.path.splitext(base_log_path)
+        if not ext:
+            ext = '.csv'
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.metrics_log_path = f"{base}_{self.run_id}_coordinator_{timestamp}{ext}"
+        self.metrics_logger = TaskLogger(self.metrics_log_path)
 
         self.get_logger().info(f"Fleet Coordinator Active: {self.robot_names}")
 
@@ -72,6 +87,88 @@ class FleetCoordinator(Node):
             )
 
         self.create_timer(0.5, self.coordination_loop, callback_group=self.cb_group)
+        self.create_timer(1.0, self._log_minimum_distances, callback_group=self.cb_group)
+
+    def _now_sec(self):
+        return self.get_clock().now().nanoseconds / 1e9
+
+    def _log_full_replan(self, reason):
+        self.metrics_logger.log(TaskLogRecord(
+            timestamp=self._now_sec(),
+            run_id=self.run_id,
+            task_id='-',
+            robot_id='fleet',
+            event='REPLAN_FULL',
+            status='OK',
+            allocation_cost=None,
+            duration=None,
+            path='|'.join(self.robot_names),
+            collision_flag=0,
+            message=reason,
+        ))
+
+    def _log_minimum_distances(self):
+        poses = {}
+        for name in self.robot_names:
+            pose = self.get_robot_pose(name)
+            if pose is None:
+                continue
+            poses[name] = (pose.pose.position.x, pose.pose.position.y)
+
+        if len(poses) < 2:
+            return
+
+        timestamp = self._now_sec()
+        min_distances = {}
+
+        for name, (x1, y1) in poses.items():
+            nearest_name = None
+            nearest_distance = float('inf')
+
+            for other_name, (x2, y2) in poses.items():
+                if other_name == name:
+                    continue
+                distance = math.hypot(x2 - x1, y2 - y1)
+                if distance < nearest_distance:
+                    nearest_distance = distance
+                    nearest_name = other_name
+
+            if nearest_name is not None:
+                min_distances[name] = (nearest_distance, nearest_name)
+
+        if not min_distances:
+            return
+
+        average_min_distance = sum(distance for distance, _ in min_distances.values()) / len(min_distances)
+
+        for robot_name, (min_distance, nearest_name) in min_distances.items():
+            self.metrics_logger.log(TaskLogRecord(
+                timestamp=timestamp,
+                run_id=self.run_id,
+                task_id='-',
+                robot_id=robot_name,
+                event='MIN_DISTANCE',
+                status='OK',
+                allocation_cost=min_distance,
+                duration=average_min_distance,
+                path='',
+                collision_flag=0,
+                message=f'nearest_robot={nearest_name}',
+            ))
+
+        self.metrics_logger.log(TaskLogRecord(
+            timestamp=timestamp,
+            run_id=self.run_id,
+            task_id='-',
+            robot_id='fleet',
+            event='MIN_DISTANCE_AVG',
+            status='OK',
+            allocation_cost=average_min_distance,
+            duration=None,
+            path='',
+            collision_flag=0,
+            message=f'robots_sampled={len(min_distances)}',
+        ))
 
     def get_robot_pose(self, robot_name):
         """Get the current pose of the robot in the map frame."""
@@ -258,6 +355,8 @@ class FleetCoordinator(Node):
             self.optimizing_plans.clear()
             self.optimizing_robot_names.clear()
             return
+
+        self._log_full_replan('original_full_optimization')
 
         if len(self.plan_buffer) > 0:
             self.get_logger().info(f"Triggering Fleet Optimization for {self.robot_count} robots...")

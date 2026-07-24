@@ -9,7 +9,7 @@ multi_chomp_server:
     robot_radius: 5.0
     obstacle_max_dist: 4.0
 
-multi_chomp_server:
+multi_chomp_server_original:
   ros__parameters:
     num_robots: 6
     waypoints_per_robot: 100

@@ -36,7 +36,15 @@ def generate_launch_description():
         description='Path to config file'
     )
 
-    # fleet path deconfliction
+    logfilepath_arg = DeclareLaunchArgument(
+        'logfilepath',
+        default_value=os.path.join(os.getcwd(), 'multi_chomp_metrics_ours.csv')
+    )
+    runid_arg = DeclareLaunchArgument(
+        'runid',
+        default_value='ours'
+    )
+
     coordinator_node = Node(
         package='multi_chomp',
         executable='multi_chomp_coordinator.py', 
@@ -45,8 +53,11 @@ def generate_launch_description():
         parameters=[
             LaunchConfiguration('config_file'),
             {'use_sim_time': LaunchConfiguration('use_sim_time')},
-            {'robot_count': 6} # Explicitly set robot count here if needed
-        ]
+            {'robot_count': 6},
+            {
+            'logfilepath': LaunchConfiguration('logfilepath'),
+            'runid': LaunchConfiguration('runid'),
+            }]
     )
 
     # multi chomp server
@@ -67,6 +78,8 @@ def generate_launch_description():
     return LaunchDescription([
         use_sim_time_arg,
         config_file_arg,
+        logfilepath_arg,
+        runid_arg,
         coordinator_node, 
         server_node        
     ])
