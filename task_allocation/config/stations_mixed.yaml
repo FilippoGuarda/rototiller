@@ -6,38 +6,37 @@ task_allocation_node:
     robot_base_frame_prefix: "robot"
     robot_base_frame_suffix: "/base_link"
     robot_footprint_radius: 0.5
-    
+
     # Graph and node matching
     node_match_threshold_m: 1.5
-    k_nearest_graph_nodes: 3  
-    station_connection_distance: 3.0 
-    
+    k_nearest_graph_nodes: 3
+    station_connection_distance: 3.0
+
     # Update rate
     update_rate_hz: 1.0
     use_sim_time: true
 
-    
     # Tropical optimization weights
     alpha_distance: 1.0
     alpha_usage: 0.5
     alpha_battery: 2.0
     task_allocation_batch_size: 3
-    
+
     # Robot defaults
     robot_defaults:
       battery_soc: 1.0
       max_range_m: 10000.0
       usage_index: 0.0
-    
+
     # === STATION CONFIGURATION ===
     # Each station type (a, b, c) has multiple instances
     # Task format: "task_id,station_name1|station_name2|station_nameN,priority"
     # Examples:
-    #   - "task_001,stationa1|stationc2,1.0"   (A→C)
-    #   - "task_002,stationc1|stationb1,2.0"   (C→B)
-    #   - "task_003,stationa1|stationb1|stationc1,1.5"  (A→B→C)
+    # - "task_001,stationa1|stationc2,1.0" (A→C)
+    # - "task_002,stationc1|stationb1,2.0" (C→B)
+    # - "task_003,stationa1|stationb1|stationc1,1.5" (A→B→C)
     retry_cooldown_sec: 10
-    max_allocation_attempts: 5000 
+    max_allocation_attempts: 5000
     station_types: ["a", "b", "c"]
     stations:
       a:
@@ -47,27 +46,27 @@ task_allocation_node:
           y: 9.0
           online: true
         stationa2:
-          x: -1.0
-          y: 9.0
-          online: true
-        stationa3:
-          x: 0.0
-          y: 9.0
-          online: true
-        stationa4:
-          x: 1.0
-          y: 9.0
-          online: true
-      
-      b:
-        names: ["stationb1", "stationb2", "stationb3", "stationb4", "stationb5"]
-        stationb1:
           x: 5.0
           y: -10.0
           online: true
-        stationb2:
+        stationa3:
           x: 5.0
           y: -9.0
+          online: true
+        stationa4:
+          x: -5.0
+          y: -15.0
+          online: true
+
+      b:
+        names: ["stationb1", "stationb2", "stationb3", "stationb4", "stationb5"]
+        stationb1:
+          x: -1.0
+          y: 9.0
+          online: true
+        stationb2:
+          x: 0.0
+          y: 9.0
           online: true
         stationb3:
           x: 5.0
@@ -78,29 +77,28 @@ task_allocation_node:
           y: -7.0
           online: false
         stationb5:
-          x: 5.0
-          y: -6.0
+          x: -5.0
+          y: -15.0
           online: false
-      
+
       c:
         names: ["stationc1", "stationc2", "stationc3", "stationc4"]
         stationc1:
-          x: -5.0
-          y: -15.0
+          x: 1.0
+          y: 9.0
           online: true
         stationc2:
-          x: -5.0
-          y: -14.0
+          x: 5.0
+          y: -6.0
           online: true
         stationc3:
           x: -5.0
-          y: -13.0
+          y: -14.0
           online: true
         stationc4:
           x: -5.0
-          y: -12.0
+          y: -13.0
           online: true
-
 
       p:
         names: ["stationp1", "stationp2", "stationp3", "stationp4", "stationp5", "stationp6"]
@@ -118,11 +116,11 @@ task_allocation_node:
           online: true
         stationp4:
           x: 9.0
-          y: 13.40
+          y: 13.4
           online: true
         stationp5:
           x: 8.7
-          y: 15.50
+          y: 15.5
           online: true
         stationp6:
           x: 7.3

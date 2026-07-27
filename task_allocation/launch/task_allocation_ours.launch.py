@@ -7,16 +7,19 @@ from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 
+NUM_TASKS = 15
+SEED = 42
+
 def generate_launch_description():
     task_allocation_dir = get_package_share_directory('task_allocation')
     graph_generator_dir = get_package_share_directory('graph_generator_node')
     multi_chomp_dir = get_package_share_directory('multi_chomp')
     
     # Import config file for task allocation
-    stations_config = os.path.join(task_allocation_dir, 'config', 'stations.yaml')
+    stations_config = os.path.join(task_allocation_dir, 'config', 'stations_random.yaml')
     # Set file address for logs, TODO: CHANGE OURS TO ORIGINAL WHEN TESTING AGAINST EXTENDED SPADES
-    log_file_path = os.path.join(os.getcwd(), 'task_allocation_log_ours_rand30.csv')
-    multi_chomp_metrics_path = os.path.join(os.getcwd(), 'multi_chomp_metrics_ours_rand30.csv')
+    log_file_path = os.path.join(os.getcwd(), f'task_allocation_log_ours_t{NUM_TASKS}_s{SEED}_r6.csv')
+    multi_chomp_metrics_path = os.path.join(os.getcwd(), f'multi_chomp_metrics_ours_t{NUM_TASKS}_s{SEED}_r6.csv')
     
     # launch graph generator and multi chomp before running the task allocation stack
     graph_gen_launch = os.path.join(graph_generator_dir, 'launch', 'graph_generator.launch.py')
@@ -70,8 +73,8 @@ def generate_launch_description():
         name="task_publisher_node",
         output="screen",
         parameters=[{
-            'seed': 42,
-            'num_tasks': 15,
+            'seed': SEED,
+            'num_tasks': NUM_TASKS,
             'min_delay_s': 2.0,
             'max_delay_s': 8.0
         }], 

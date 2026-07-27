@@ -6,125 +6,123 @@ task_allocation_node:
     robot_base_frame_prefix: "robot"
     robot_base_frame_suffix: "/base_link"
     robot_footprint_radius: 0.5
-    
+
     # Graph and node matching
     node_match_threshold_m: 1.5
-    k_nearest_graph_nodes: 3  
-    station_connection_distance: 3.0 
-    
+    k_nearest_graph_nodes: 3
+    station_connection_distance: 3.0
+
     # Update rate
     update_rate_hz: 1.0
     use_sim_time: true
 
-    
     # Tropical optimization weights
     alpha_distance: 1.0
     alpha_usage: 0.5
     alpha_battery: 2.0
     task_allocation_batch_size: 3
-    
+
     # Robot defaults
     robot_defaults:
       battery_soc: 1.0
       max_range_m: 10000.0
       usage_index: 0.0
-    
+
     # === STATION CONFIGURATION ===
     # Each station type (a, b, c) has multiple instances
     # Task format: "task_id,station_name1|station_name2|station_nameN,priority"
     # Examples:
-    #   - "task_001,stationa1|stationc2,1.0"   (A→C)
-    #   - "task_002,stationc1|stationb1,2.0"   (C→B)
-    #   - "task_003,stationa1|stationb1|stationc1,1.5"  (A→B→C)
+    # - "task_001,stationa1|stationc2,1.0" (A→C)
+    # - "task_002,stationc1|stationb1,2.0" (C→B)
+    # - "task_003,stationa1|stationb1|stationc1,1.5" (A→B→C)
     retry_cooldown_sec: 10
-    max_allocation_attempts: 5000 
+    max_allocation_attempts: 5000
     station_types: ["a", "b", "c"]
     stations:
       a:
         names: ["stationa1", "stationa2", "stationa3", "stationa4"]
         stationa1:
-          x: -2.0
-          y: 9.0
+          x: 3.2333807945251465
+          y: 8.146064758300781
           online: true
         stationa2:
-          x: -1.0
-          y: 9.0
+          x: -4.6849164962768555
+          y: -24.557588577270508
           online: true
         stationa3:
-          x: 0.0
-          y: 9.0
+          x: 8.478278160095215
+          y: -17.1589298248291
           online: true
         stationa4:
-          x: 1.0
-          y: 9.0
+          x: -1.285765290260315
+          y: -27.612239837646484
           online: true
-      
+
       b:
         names: ["stationb1", "stationb2", "stationb3", "stationb4", "stationb5"]
         stationb1:
-          x: 5.0
-          y: -10.0
+          x: -4.91110372543335
+          y: -33.17117691040039
           online: true
         stationb2:
-          x: 5.0
-          y: -9.0
+          x: 0.3470543622970581
+          y: 11.908671379089355
           online: true
         stationb3:
-          x: 5.0
-          y: -8.0
+          x: 4.486771106719971
+          y: 16.523889541625977
           online: false
         stationb4:
-          x: 5.0
-          y: -7.0
+          x: -3.407822370529175
+          y: 11.85446834564209
           online: false
         stationb5:
-          x: 5.0
-          y: -6.0
+          x: 1.2545961141586304
+          y: -2.3953888416290283
           online: false
-      
+
       c:
         names: ["stationc1", "stationc2", "stationc3", "stationc4"]
         stationc1:
-          x: -5.0
-          y: -15.0
+          x: -2.6660754680633545
+          y: -8.309004783630371
           online: true
         stationc2:
-          x: -5.0
-          y: -14.0
+          x: 4.976189613342285
+          y: -24.31800651550293
           online: true
         stationc3:
-          x: -5.0
-          y: -13.0
+          x: -4.963335990905762
+          y: -33.021751403808594
           online: true
         stationc4:
-          x: -5.0
-          y: -12.0
+          x: -8.341404914855957
+          y: -17.551912307739258
           online: true
-
 
       p:
         names: ["stationp1", "stationp2", "stationp3", "stationp4", "stationp5", "stationp6"]
         stationp1:
-          x: -8.5
-          y: 13.2
+          x: 6.3092427253723145
+          y: -33.4096794128418
           online: true
         stationp2:
-          x: -8.5
-          y: 15.3
+          x: -9.114398002624512
+          y: -33.38203048706055
           online: true
         stationp3:
-          x: -6.8
-          y: 15.5
+          x: -8.81141471862793
+          y: -26.619558334350586
           online: true
         stationp4:
-          x: 9.0
-          y: 13.40
+          x: -8.52938175201416
+          y: -18.4056453704834
           online: true
         stationp5:
-          x: 8.7
-          y: 15.50
+          x: -8.04521656036377
+          y: -3.380655288696289
           online: true
         stationp6:
-          x: 7.3
-          y: 15.4
+          x: -4.383885383605957
+          y: -14.19082260131836
           online: true

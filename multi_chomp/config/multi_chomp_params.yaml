@@ -3,22 +3,26 @@ multi_chomp_server:
     num_robots: 6
     waypoints_per_robot: 100
     dt: 0.1
-    eta: 10000.0     # learning rate
+    eta: 100000.0     # learning rate
     lambda: 0.01     # smoothness 
     mu: 10.0         # Obstacle/Collision weight
     robot_radius: 5.0
     obstacle_max_dist: 4.0
+    obstacle_gain: 0.2
+    inter_gain: 1.0
 
 multi_chomp_server_original:
   ros__parameters:
     num_robots: 6
     waypoints_per_robot: 100
     dt: 0.1
-    eta: 10000.0     # learning rate
+    eta: 100000.0     # learning rate
     lambda: 0.01     # smoothness 
     mu: 10.0         # Obstacle/Collision weight
     robot_radius: 5.0
     obstacle_max_dist: 4.0
+    obstacle_gain: 0.2
+    inter_gain: 1.0
 
 
 fleet_coordinator:
