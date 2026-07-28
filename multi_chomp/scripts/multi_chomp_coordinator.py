@@ -24,7 +24,7 @@ class FleetCoordinator(Node):
 
         self.cb_group = ReentrantCallbackGroup()
 
-        self.declare_parameter('robot_count', 6)
+        self.declare_parameter('num_robots', 6)
         self.declare_parameter('controller_id', 'FollowPath')
         self.declare_parameter('max_optimized_segment_length', 0.25)
         self.declare_parameter('stretch_factor', 2.0)
@@ -37,9 +37,9 @@ class FleetCoordinator(Node):
 
 
 
-        self.robot_count = self.get_parameter('robot_count').value
+        self.num_robots = self.get_parameter('num_robots').value
         self.controller_id = self.get_parameter('controller_id').value
-        self.robot_names = [f'robot{i}' for i in range(1, self.robot_count + 1)]
+        self.robot_names = [f'robot{i}' for i in range(1, self.num_robots + 1)]
 
         self.run_id = str(self.get_parameter('runid').value)
         base_log_path = str(self.get_parameter('logfilepath').value)
@@ -597,7 +597,7 @@ class FleetCoordinator(Node):
         self.optimization_in_progress = True
         
         goal_msg = MultiChompOptimize.Goal()
-        goal_msg.num_robots = self.robot_count
+        goal_msg.num_robots = self.num_robots
 
         # Dynamic iterations: 100 for initial convergence, 10 for sliding-window updates
         full_replan = len(self.new_plan_buffer) > 0
@@ -638,7 +638,7 @@ class FleetCoordinator(Node):
             return
 
         if len(self.new_plan_buffer) > 0:
-            self.get_logger().info(f"Triggering Fleet Optimization for {self.robot_count} robots...")
+            self.get_logger().info(f"Triggering Fleet Optimization for {self.num_robots} robots...")
         
         self.chomp_client.send_goal_async(goal_msg).add_done_callback(lambda f: self.optimization_response_callback(f))
 
@@ -663,7 +663,7 @@ class FleetCoordinator(Node):
             result = future.result().result
             optimized_paths = result.optimized_paths
             
-            if len(optimized_paths) != self.robot_count:
+            if len(optimized_paths) != self.num_robots:
                 self.get_logger().error("Mismatch in optimized paths count!")
                 self.optimization_in_progress = False
                 self.optimizing_plans.clear()
