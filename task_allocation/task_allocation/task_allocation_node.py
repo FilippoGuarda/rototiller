@@ -346,7 +346,7 @@ class TaskAllocationNode(Node):
                     f"Robot {robot_id} home parking {park_station} physically "
                     f"occupied by robot {occupant}. Waiting."
                 )
-            return
+                return
 
         now_sec = self.get_clock().now().nanoseconds / 1e9
         self.robot_tasks[robot_id] = {
@@ -582,11 +582,21 @@ class TaskAllocationNode(Node):
                             }
                             self.occupied_stations.add(selected_path[0])
                             self.send_to_station(r, selected_path[0], log_dispatch=True)
+
+                            assigned_task_ids.add(task.task_id)
+
+                            if not is_parking and r in eligible_robots:
+                                eligible_robots.remove(r)
                         else:
+
+                            self.get_logger().warn(
+                                f"Solver selected robot_{r} for {task.task_id} "
+                                f"but it is busy with a non-parking task. "
+                                f"Task will be re-queued."
+                            )
                             continue
 
                         self.robot_states[r].usage_index += 1.0
-
 
                         # Do not log parking tasks
                         if not is_parking:
@@ -605,7 +615,7 @@ class TaskAllocationNode(Node):
                                     message="Task assigned to robot",
                                 )
                             )
-                        break
+                            break
 
         return assigned_task_ids
 
@@ -724,40 +734,51 @@ class TaskAllocationNode(Node):
             curr_station = self.stations[curr_station_name]
 
             r_pos = self.get_robot_position(r)
-            if r_pos:
-                dist = math.hypot(
-                    r_pos[0] - curr_station.position[0],
-                    r_pos[1] - curr_station.position[1],
-                )
+            if r_pos is None:
+                continue
 
-                if dist < self.robot_footprint_radius:
-                    task_info["station_reservation_time"] = now_sec
+            dist = math.hypot(
+                r_pos[0] - curr_station.position[0],
+                r_pos[1] - curr_station.position[1],
+            )
 
-                    if task_info["arrival_time"] is None:
-                        task_info["arrival_time"] = now_sec
-                        continue
+            if dist >= self.robot_footprint_radius:
+                    continue
 
-                    # Last station in path — mark complete on next tick
-                    if curr_idx == len(path) - 1:
-                        task_info["current_idx"] += 1
-                        task_info["arrival_time"] = None
-                        if self.stations[curr_station_name].station_type == "p":
-                            self.occupied_stations.discard(curr_station_name)
-                            task_info["is_parking"] = True
-                        continue
+            # Robot has reached the current station.
+            task_info["station_reservation_time"] = now_sec
 
-                    next_station = path[curr_idx + 1]
-                    self.occupied_stations.add(next_station)
+            # First update inside the station radius starts the dwell timer.
+            if task_info["arrival_time"] is None:
+                task_info["arrival_time"] = now_sec
+                continue
+
+            # Enforce the configured station dwell time.
+            if now_sec - task_info["arrival_time"] < self.station_dwell_time:
+                continue
+
+            # The robot has completed the current station visit.
+            if curr_idx == len(path) - 1:
+                task_info["current_idx"] += 1
+                task_info["arrival_time"] = None
+
+                if self.stations[curr_station_name].station_type == "p":
                     self.occupied_stations.discard(curr_station_name)
-                    self.send_to_station(r, next_station, log_dispatch=True)
-                    task_info["current_idx"] += 1
-                    task_info["arrival_time"] = None
+                    task_info["is_parking"] = True
+                continue
 
-                    if (
-                        task_info["current_idx"] == len(path) - 1
-                        and self.stations[next_station].station_type == "p"
-                    ):
-                        task_info["is_parking"] = True
+            next_station = path[curr_idx + 1]
+            self.occupied_stations.add(next_station)
+            self.occupied_stations.discard(curr_station_name)
+            self.send_to_station(r, next_station, log_dispatch=True)
+            task_info["current_idx"] += 1
+            task_info["arrival_time"] = None
+
+            if (
+                task_info["current_idx"] == len(path) - 1
+                and self.stations[next_station].station_type == "p"
+            ):
+                task_info["is_parking"] = True
 
         # Send idle robots home before running the optimizer
         for r in range(1, self.num_robots + 1):

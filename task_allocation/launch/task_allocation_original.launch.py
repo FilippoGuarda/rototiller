@@ -43,7 +43,7 @@ def generate_launch_description():
             'runid': 'original',
         }.items()
     )
-    # launch_description.add_action(multi_chomp_launch_include)
+    launch_description.add_action(multi_chomp_launch_include)
 
     task_allocation_node = Node(
         package="task_allocation",
