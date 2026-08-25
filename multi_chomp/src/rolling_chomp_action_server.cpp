@@ -1,5 +1,5 @@
-#include "multi_chomp/multi_chomp_action_server.hpp"
-#include "multi_chomp/multi_chomp.hpp"
+#include "multi_chomp/rolling_chomp_action_server.hpp"
+#include "multi_chomp/rolling_chomp.hpp"
 
 using std::placeholders::_1;
 using std::placeholders::_2;

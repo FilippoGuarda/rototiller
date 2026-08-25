@@ -27,10 +27,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 
 ament_export_dependencies(rosidl_default_runtime)
 # create the executables ONCE INTERFACES ARE CREATED OR IT DOES NOT WORK
-add_executable(multi_chomp_action_server
-  src/multi_chomp.cpp
-  src/multi_chomp_action_server.cpp 
-  src/multi_chomp_action_server_main.cpp
+add_executable(rolling_chomp_action_server
+  src/rolling_chomp.cpp
+  src/rolling_chomp_action_server.cpp 
+  src/rolling_chomp_action_server_main.cpp
 )
 
 add_executable(multi_chomp_original_action_server
@@ -39,7 +39,7 @@ add_executable(multi_chomp_original_action_server
 )
 
 # linking libraries
-ament_target_dependencies(multi_chomp_action_server
+ament_target_dependencies(rolling_chomp_action_server
   rclcpp
   rclcpp_action
   geometry_msgs
@@ -62,12 +62,12 @@ ament_target_dependencies(multi_chomp_original_action_server
   tf2_ros
 )
 
-target_include_directories(multi_chomp_action_server PUBLIC
+target_include_directories(rolling_chomp_action_server PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 
-target_link_libraries(multi_chomp_action_server  ${OpenCV_LIBRARIES})
+target_link_libraries(rolling_chomp_action_server  ${OpenCV_LIBRARIES})
 
 target_include_directories(multi_chomp_original_action_server PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -80,12 +80,12 @@ target_link_libraries(multi_chomp_original_action_server  ${OpenCV_LIBRARIES})
 rosidl_get_typesupport_target(cpp_typesupport_target
   ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
-target_link_libraries(multi_chomp_action_server
+target_link_libraries(rolling_chomp_action_server
   "${cpp_typesupport_target}"
 )
 
 install(TARGETS
-  multi_chomp_action_server
+  rolling_chomp_action_server
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -101,7 +101,7 @@ install(TARGETS
 # python script install
 install(PROGRAMS
   scripts/multi_chomp_coordinator_original.py
-  scripts/multi_chomp_coordinator.py
+  scripts/rolling_chomp_coordinator.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

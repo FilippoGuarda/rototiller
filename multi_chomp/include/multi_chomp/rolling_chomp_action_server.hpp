@@ -11,7 +11,7 @@
 #include "multi_chomp/action/multi_chomp_optimize.hpp"
 #include "nav_msgs/msg/path.hpp"
 
-#include "multi_chomp.hpp"
+#include "rolling_chomp.hpp"
 
 class MultiChompActionServer : public rclcpp::Node
 {

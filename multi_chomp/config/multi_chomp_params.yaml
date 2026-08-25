@@ -1,4 +1,4 @@
-multi_chomp_server:
+rolling_chomp_server:
   ros__parameters:
     num_robots: 6
     waypoints_per_robot: 100
