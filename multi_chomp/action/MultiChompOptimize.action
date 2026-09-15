@@ -1,12 +1,14 @@
 # Goal
 int32 num_robots
+uint32 max_iterations
 nav_msgs/Path[] input_paths
-int32 max_iterations
 ---
 # Result
 nav_msgs/Path[] optimized_paths
+float64 computation_time
+uint32 iterations_executed
 ---
 # Feedback
-float32 progress
-int32 current_iteration
-float32 current_cost
+float64 progress
+uint32 current_iteration
+float64 current_cost

@@ -38,7 +38,7 @@ def generate_launch_description():
 
     logfilepath_arg = DeclareLaunchArgument(
         'logfilepath',
-        default_value=os.path.join(os.getcwd(), 'multi_chomp_metrics_ours.csv')
+        default_value=os.path.join(os.getcwd(), 'rolling_chomp_metrics.csv')
     )
     runid_arg = DeclareLaunchArgument(
         'runid',
@@ -63,8 +63,8 @@ def generate_launch_description():
     # multi chomp server
     server_node = Node(
         package='multi_chomp',
-        executable='multi_chomp_action_server',
-        name='multi_chomp_server',
+        executable='rolling_chomp_action_server',
+        name='rolling_chomp_server',
         output='screen',
         parameters=[
             LaunchConfiguration('config_file'),

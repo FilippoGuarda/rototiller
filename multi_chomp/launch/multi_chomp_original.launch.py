@@ -38,7 +38,7 @@ def generate_launch_description():
 
     logfilepath_arg = DeclareLaunchArgument(
         'logfilepath',
-        default_value=os.path.join(os.getcwd(), 'multi_chomp_metrics_original.csv')
+        default_value=os.path.join(os.getcwd(), 'multi_chomp_metrics.csv')
     )
     runid_arg = DeclareLaunchArgument(
         'runid',

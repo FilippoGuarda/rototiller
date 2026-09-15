@@ -11,12 +11,12 @@ import nav_msgs.msg
 import tf2_ros
 from tf2_ros import Buffer, TransformListener
 import math
+import time
 from rclpy.callback_groups import ReentrantCallbackGroup
 import os
 from datetime import datetime
 
 from task_allocation.task_logger import TaskLogger, TaskLogRecord
-
 
 class FleetCoordinator(Node):
     def __init__(self):
@@ -32,10 +32,9 @@ class FleetCoordinator(Node):
         self.declare_parameter('stuck_timeout_sec', 5.0)
         self.declare_parameter('stuck_motion_epsilon', 0.05)
         self.declare_parameter('stuck_replan_cooldown_sec', 3.0)
+        self.declare_parameter('goal_arrival_radius', 0.35)
         self.declare_parameter('logfilepath', os.path.join(os.getcwd(), 'multichomp_metrics.csv'))
         self.declare_parameter('runid', 'ours')
-
-
 
         self.num_robots = self.get_parameter('num_robots').value
         self.controller_id = self.get_parameter('controller_id').value
@@ -50,37 +49,46 @@ class FleetCoordinator(Node):
         self.metrics_log_path = f"{base}_{self.run_id}_coordinator_{timestamp}{ext}"
         self.metrics_logger = TaskLogger(self.metrics_log_path)
 
-        
         self.stuck_timeout_sec = self.get_parameter('stuck_timeout_sec').value
         self.stuck_motion_epsilon = self.get_parameter('stuck_motion_epsilon').value
         self.stuck_replan_cooldown_sec = self.get_parameter('stuck_replan_cooldown_sec').value
 
-        
         self.max_optimized_segment_length = self.get_parameter('max_optimized_segment_length').value
         self.stretch_factor = self.get_parameter('stretch_factor').value
         self.replan_cooldown_sec = self.get_parameter('replan_cooldown_sec').value
-
+        self.goal_arrival_radius = self.get_parameter('goal_arrival_radius').value
 
         self.get_logger().info(f"Fleet Coordinator Active: {self.robot_names}")
 
         # --- State Management ---
-        self.goals = {}          
-        self.active_goals = {}   
-        self.new_plan_buffer = {} 
+        self.goals = {}
+        self.active_goals = {}
+        self.new_plan_buffer = {}
         self.optimization_in_progress = False
         self.pending_plan_requests = set()
         self.optimizing_plans = []
-        
+
         self.last_robot_pose = {}
         self.last_motion_time = {}
         self.last_stuck_replan_time = {}
 
-
-        self.active_paths = {}       
-        self.moving_robots = set()   
+        self.active_paths = {}
+        self.moving_robots = set()
         self.last_forced_replan_time = {}
         self.plan_request_seq = {name: 0 for name in self.robot_names}
 
+        # --- FollowPath goal-handle tracking (prevents resending a new
+        # FollowPath goal while the previous one is still executing) ---
+        self.exec_goal_handles = {}
+        self.exec_in_flight = set()
+
+        # --- Optimization compute-time tracking ---
+        self._opt_wall_start = None
+        self._opt_iterations = 0
+        # True when this run optimizes fresh Nav2 initializations (complete
+        # replan, 100 iterations), False for sliding-window updates of the
+        # existing optimized paths (partial replan, 10 iterations)
+        self._opt_full_replan = False
 
         # --- TF Buffer ---
         self.tf_buffer = Buffer()
@@ -106,13 +114,12 @@ class FleetCoordinator(Node):
         for name in self.robot_names:
             self.goal_subs.append(
                 self.create_subscription(
-                    PoseStamped, f'/{name}/spades_goal', 
+                    PoseStamped, f'/{name}/spades_goal',
                     lambda msg, n=name: self.goal_callback(msg, n), 10, callback_group=self.cb_group)
             )
 
         self.create_timer(0.5, self.coordination_loop, callback_group=self.cb_group)
         self.create_timer(1.0, self._log_minimum_distances, callback_group=self.cb_group)
-
 
     def _log_full_replan(self, reason):
         self.metrics_logger.log(TaskLogRecord(
@@ -127,6 +134,60 @@ class FleetCoordinator(Node):
             path='|'.join(self.robot_names),
             collision_flag=0,
             message=reason,
+        ))
+
+    def _log_compute_time(self, result=None, status='OK', error_message=''):
+        """Logs the optimization time of one MultiChompOptimize run.
+
+        Primary source: the algorithm-reported time in result.computation_time
+        and the executed solver iterations in result.iterations_executed, both
+        set by the C++ action server. Fallback (if the fields are absent):
+        the coordinator-measured round trip from goal submission to result
+        reception.
+
+        Events:
+            CHOMP_TIME_FULL    -> complete replan (fresh Nav2 initializations,
+                                  100 iterations)
+            CHOMP_TIME_PARTIAL -> partial replan (sliding-window update of the
+                                  existing optimized paths, 10 iterations)
+
+        The time in seconds is stored in the 'duration' column. The 'message'
+        column records the source (algorithm|round_trip) so the two can be
+        told apart in the CSV.
+        """
+        if self._opt_wall_start is None:
+            return
+
+        round_trip = time.perf_counter() - self._opt_wall_start
+        self._opt_wall_start = None
+
+        algo_time = getattr(result, 'computation_time', None) if result is not None else None
+        compute_time = float(algo_time) if algo_time is not None else round_trip
+        source = 'algorithm' if algo_time is not None else 'round_trip'
+
+        iters_executed = getattr(result, 'iterations_executed', None) if result is not None else None
+
+        event = 'CHOMP_TIME_FULL' if self._opt_full_replan else 'CHOMP_TIME_PARTIAL'
+
+        message = f'iterations={self._opt_iterations};'
+        if iters_executed is not None:
+            message += f'iterations_executed={int(iters_executed)};'
+        message += f'source={source};round_trip={round_trip:.6f}'
+        if error_message:
+            message = f'{message};{error_message}'
+
+        self.metrics_logger.log(TaskLogRecord(
+            timestamp=self._now_sec(),
+            run_id=self.run_id,
+            task_id='-',
+            robot_id='fleet',
+            event=event,
+            status=status,
+            allocation_cost=None,
+            duration=compute_time,
+            path='',
+            collision_flag=0,
+            message=message,
         ))
 
     def _log_minimum_distances(self):
@@ -238,14 +299,12 @@ class FleetCoordinator(Node):
 
         return max_opt_segment > threshold, max_opt_segment, threshold
 
-
     def _can_force_replan(self, robot_name):
         """Avoid repeatedly forcing replans every optimization cycle."""
         now_sec = self.get_clock().now().nanoseconds / 1e9
         last_sec = self.last_forced_replan_time.get(robot_name, -float('inf'))
 
         return (now_sec - last_sec) >= self.replan_cooldown_sec
-
 
     def _force_new_initialization_trajectory(self, robot_name, reason):
         """
@@ -284,18 +343,16 @@ class FleetCoordinator(Node):
         self.last_forced_replan_time[robot_name] = now_sec
 
         return True
-    
+
     # Stuck robot helper functions
     def _now_sec(self):
         return self.get_clock().now().nanoseconds / 1e9
-
 
     def _pose_xy(self, pose):
         return (
             pose.pose.position.x,
             pose.pose.position.y
         )
-
 
     def _update_robot_motion_state(self, robot_name, current_pose):
         """
@@ -323,7 +380,6 @@ class FleetCoordinator(Node):
             self.last_motion_time[robot_name] = now
             self.last_robot_pose[robot_name] = current_pose
 
-
     def _is_robot_stuck(self, robot_name):
         """
         Returns True if robot has not moved enough for stuck_timeout_sec.
@@ -336,7 +392,6 @@ class FleetCoordinator(Node):
 
         return stopped_duration > self.stuck_timeout_sec
 
-
     def _can_stuck_replan(self, robot_name):
         """
         Prevents repeated replans every control loop while the robot is stuck.
@@ -345,7 +400,6 @@ class FleetCoordinator(Node):
         last = self.last_stuck_replan_time.get(robot_name, -float('inf'))
 
         return (now - last) > self.stuck_replan_cooldown_sec
-
 
     def _force_complete_replan_due_to_stuck(self, robot_name):
         """
@@ -385,18 +439,17 @@ class FleetCoordinator(Node):
 
         return True
 
-
     def get_robot_pose(self, robot_name):
         """Get the current pose of the robot in the map frame."""
         try:
             target_frame = 'map'
             source_frame = f'{robot_name}/base_link'
-            
+
             if not self.tf_buffer.can_transform(target_frame, source_frame, rclpy.time.Time()):
                 return None
 
             t = self.tf_buffer.lookup_transform(target_frame, source_frame, rclpy.time.Time())
-            
+
             pose = PoseStamped()
             pose.header.frame_id = target_frame
             pose.header.stamp = self.get_clock().now().to_msg()
@@ -424,7 +477,7 @@ class FleetCoordinator(Node):
         return self._create_stationary_path(pose, length)
 
     def _clip_path_to_robot(self, path, current_pose):
-        """Clips the stale start of a Nav2 path to where the robot CURRENTLY is, 
+        """Clips the stale start of a Nav2 path to where the robot CURRENTLY is,
         eliminating minor rubberbanding caused by planner latency."""
         if not current_pose or len(path.poses) < 2:
             return path
@@ -447,7 +500,23 @@ class FleetCoordinator(Node):
             path.poses = path.poses[min_idx:]
         return path
 
-    
+    def _is_near_path_end(self, robot_name, current_pose):
+        """True if the robot is within goal_arrival_radius of the final pose
+        of its currently tracked active_path. Used to avoid resending a fresh
+        FollowPath goal to a robot that is moments from arriving."""
+        if current_pose is None:
+            return False
+
+        path = self.active_paths.get(robot_name)
+        if not path or not path.poses:
+            return False
+
+        end_pos = path.poses[-1].pose.position
+        cx = current_pose.pose.position.x
+        cy = current_pose.pose.position.y
+
+        return math.hypot(end_pos.x - cx, end_pos.y - cy) <= self.goal_arrival_radius
+
     def goal_callback(self, msg, robot_name):
         self.get_logger().info(f"Goal received for {robot_name}")
 
@@ -467,13 +536,12 @@ class FleetCoordinator(Node):
         self.last_motion_time[robot_name] = now
         self.last_stuck_replan_time.pop(robot_name, None)
 
-
     def coordination_loop(self):
         if not self.chomp_client.server_is_ready() or self.optimization_in_progress:
             return
 
         # Deviation check: Completely recompute if thrown off track
-            
+
         for name in self.robot_names:
             current_pose = self.get_robot_pose(name)
 
@@ -497,17 +565,6 @@ class FleetCoordinator(Node):
                 cx = current_pose.pose.position.x
                 cy = current_pose.pose.position.y
 
-                   # # Goal reached check
-                # # TODO: this is a problem, if a robot path is recalled it initializes with the same position of old destination
-                # # it automatically goes into destination reached, gotta check the path update logic
-                # if math.hypot(gx - cx, gy - cy) < 0.35: 
-                #     self.get_logger().info(f"{name} securely reached its destination.")
-                #     self.moving_robots.discard(name)
-                #     self.goals.pop(name, None)
-                #     self.active_goals.pop(name, None)
-                #     self.active_paths.pop(name, None) # TODO: test fix
-                #     continue
-
                 # Deviation check -> Force Nav2 Replan only if robot is truly off-path
                 first_pose = self.active_paths[name].poses[0].pose.position
 
@@ -515,15 +572,13 @@ class FleetCoordinator(Node):
                     self.get_logger().warn(
                         f"Robot {name} deviated heavily. Recomputing path entirely."
                     )
+
                     if name in self.active_goals:
                         self.goals[name] = self.active_goals[name]
 
                     self.active_paths.pop(name, None)
                     self.new_plan_buffer.pop(name, None)
                     self.pending_plan_requests.discard(name)
-
-             
-
 
         # Request Nav2 Plans ONLY for robots with pending goals
         # Using list() safely iterates while dictionary size changes
@@ -536,27 +591,27 @@ class FleetCoordinator(Node):
                     goal_msg = ComputePathToPose.Goal()
                     goal_msg.goal = self.goals[name]
                     goal_msg.planner_id = "GridBased"
-                    goal_msg.use_start = False 
+                    goal_msg.use_start = False
                     self.plan_request_seq[name] += 1
                     request_seq = self.plan_request_seq[name]
 
                     future = self.nav2_plan_clients[name].send_goal_async(goal_msg)
                     future.add_done_callback(
                         lambda f, n=name, seq=request_seq:
-                        self.nav2_plan_response_callback(f, n, seq)
+                            self.nav2_plan_response_callback(f, n, seq)
                     )
 
         # Check Optimization Readiness
         robots_with_new_goals = [r for r in self.goals]
         robots_with_new_plans_ready = [r for r in robots_with_new_goals if r in self.new_plan_buffer]
-        
+
         # Wait until all newly requested plans have been returned by Nav2
         if len(robots_with_new_goals) > 0 and len(robots_with_new_plans_ready) != len(robots_with_new_goals):
             return
-            
+
         # Trigger closed-loop optimization if there are active trajectories or new plans to compute
         if len(robots_with_new_plans_ready) > 0 or len(self.moving_robots) > 0:
-             self.trigger_fleet_optimization()
+            self.trigger_fleet_optimization()
 
     def nav2_plan_response_callback(self, future, robot_name, request_seq):
         try:
@@ -564,16 +619,16 @@ class FleetCoordinator(Node):
             if not goal_handle.accepted:
                 self.pending_plan_requests.discard(robot_name)
                 return
-            
+
             goal_handle.get_result_async().add_done_callback(
                 lambda f, n=robot_name, seq=request_seq:
-                self.nav2_plan_result_callback(f, n, seq)
+                    self.nav2_plan_result_callback(f, n, seq)
             )
+
         except Exception:
             self.pending_plan_requests.discard(robot_name)
 
     def nav2_plan_result_callback(self, future, robot_name, request_seq):
-        
         try:
             if request_seq != self.plan_request_seq[robot_name]:
                 self.get_logger().warn(
@@ -595,7 +650,7 @@ class FleetCoordinator(Node):
 
     def trigger_fleet_optimization(self):
         self.optimization_in_progress = True
-        
+
         goal_msg = MultiChompOptimize.Goal()
         goal_msg.num_robots = self.num_robots
 
@@ -609,7 +664,7 @@ class FleetCoordinator(Node):
         # Keep track of which plans we are processing so we can cleanly pop them later
         self.optimizing_plans = list(self.new_plan_buffer.keys())
         inputs_valid = True
-        
+
         for name in self.robot_names:
             path_to_send = None
             current_pose = self.get_robot_pose(name)
@@ -624,12 +679,12 @@ class FleetCoordinator(Node):
             else:
                 # Stationary obstacle
                 path_to_send = self.create_holding_path(name)
-            
+
             if path_to_send is None:
                 self.get_logger().warn(f"Skipping optimization: Could not get state for {name}")
                 inputs_valid = False
                 break
-                
+
             goal_msg.input_paths.append(path_to_send)
 
         if not inputs_valid:
@@ -637,32 +692,50 @@ class FleetCoordinator(Node):
             self.optimizing_plans.clear()
             return
 
+        # Start the compute-time measurement for this optimization run.
+        # full_replan=True -> complete replan (fresh initializations, 100 iters)
+        # full_replan=False -> partial replan (sliding-window update, 10 iters)
+        self._opt_wall_start = time.perf_counter()
+        self._opt_iterations = goal_msg.max_iterations
+        self._opt_full_replan = full_replan
+
         if len(self.new_plan_buffer) > 0:
             self.get_logger().info(f"Triggering Fleet Optimization for {self.num_robots} robots...")
-        
-        self.chomp_client.send_goal_async(goal_msg).add_done_callback(lambda f: self.optimization_response_callback(f))
+
+        self.chomp_client.send_goal_async(goal_msg).add_done_callback(
+            lambda f: self.optimization_response_callback(f)
+        )
 
     def optimization_response_callback(self, future):
         try:
             goal_handle = future.result()
             if not goal_handle.accepted:
+                self._log_compute_time(status='ERROR', error_message='goal_rejected')
                 self.optimization_in_progress = False
                 self.optimizing_plans.clear()
                 return
-            
+
             goal_handle.get_result_async().add_done_callback(
                 lambda f: self.optimization_result_callback(f)
             )
+
         except Exception as e:
             self.get_logger().error(f"Optimization request failed: {e}")
+            self._log_compute_time(status='ERROR', error_message=f'goal_send_failed:{e}')
             self.optimization_in_progress = False
             self.optimizing_plans.clear()
 
     def optimization_result_callback(self, future):
         try:
             result = future.result().result
+
+            # Log the algorithm-reported optimization time for this run
+            # (falls back to round-trip time if the action server does not
+            # provide computation_time)
+            self._log_compute_time(result=result)
+
             optimized_paths = result.optimized_paths
-            
+
             if len(optimized_paths) != self.num_robots:
                 self.get_logger().error("Mismatch in optimized paths count!")
                 self.optimization_in_progress = False
@@ -673,11 +746,24 @@ class FleetCoordinator(Node):
 
             for i, robot_name in enumerate(self.robot_names):
                 opt_path = optimized_paths[i]
-                
+
                 if len(opt_path.poses) < 2:
                     continue
-                
+
                 if robot_name in self.moving_robots:
+                    # Skip resending a fresh FollowPath goal if the robot is
+                    # already moments from arriving at the end of its current
+                    # active path. This prevents the coordinator from
+                    # rerouting/stopping a robot that is about to finish its
+                    # current task, which starves station-arrival detection
+                    # in the task allocation node.
+                    current_pose = self.get_robot_pose(robot_name)
+                    if self._is_near_path_end(robot_name, current_pose):
+                        self.get_logger().debug(
+                            f"{robot_name} is near path end; skipping path resend this cycle."
+                        )
+                        continue
+
                     reference_path = self.active_paths.get(robot_name)
 
                     too_stretched, max_segment, threshold = self._is_path_too_stretched(
@@ -715,15 +801,17 @@ class FleetCoordinator(Node):
                 self.new_plan_buffer.pop(n, None)
             self.optimizing_plans.clear()
             self.optimization_in_progress = False
-            
+
         except Exception as e:
             self.get_logger().error(f"Optimization callback exception: {e}")
+            self._log_compute_time(status='ERROR', error_message=f'result_callback_exception:{e}')
             self.optimization_in_progress = False
             self.optimizing_plans.clear()
 
     def execute_path(self, robot_name, path):
         client = self.nav2_exec_clients.get(robot_name)
-        if not client: return
+        if not client:
+            return
 
         now = self.get_clock().now().to_msg()
         path.header.stamp = now
@@ -737,11 +825,34 @@ class FleetCoordinator(Node):
         if not client.wait_for_server(timeout_sec=1.0):
             self.get_logger().warn(f"Action server not available for {robot_name}")
             return
-        
+
+        # Cancel any FollowPath goal still executing for this robot before
+        # sending the new one. Sending a new goal directly would make Nav2
+        # preempt the old one anyway, but doing it explicitly lets us track
+        # exec_in_flight accurately and avoid firing a redundant send while a
+        # cancel is still pending.
+        old_handle = self.exec_goal_handles.pop(robot_name, None)
+        self.exec_in_flight.discard(robot_name)
+
+        if old_handle is not None:
+            cancel_future = old_handle.cancel_goal_async()
+            cancel_future.add_done_callback(
+                lambda f, n=robot_name, p=path: self._send_follow_path(n, p)
+            )
+        else:
+            self._send_follow_path(robot_name, path)
+
+    def _send_follow_path(self, robot_name, path):
+        client = self.nav2_exec_clients.get(robot_name)
+        if not client:
+            return
+
         goal_msg = FollowPath.Goal()
         goal_msg.path = path
         goal_msg.controller_id = self.controller_id
-        
+
+        self.exec_in_flight.add(robot_name)
+
         client.send_goal_async(goal_msg).add_done_callback(
             lambda f, n=robot_name: self.execute_response_callback(f, n)
         )
@@ -750,19 +861,24 @@ class FleetCoordinator(Node):
         try:
             goal_handle = future.result()
             if goal_handle.accepted:
+                self.exec_goal_handles[robot_name] = goal_handle
                 goal_handle.get_result_async().add_done_callback(
                     lambda f, n=robot_name: self.execute_result_callback(f, n)
                 )
             else:
                 self.get_logger().error(f"Controller REJECTED path for {robot_name}")
+                self.exec_in_flight.discard(robot_name)
         except Exception:
-            pass
+            self.exec_in_flight.discard(robot_name)
 
     def execute_result_callback(self, future, robot_name):
         try:
             status = future.result().status
+            self.exec_in_flight.discard(robot_name)
+
             if status == GoalStatus.STATUS_SUCCEEDED:
                 self.get_logger().info(f"{robot_name} securely reached its destination.")
+                self.exec_goal_handles.pop(robot_name, None)
 
                 # Only treat as finished if there is no newer goal or active goal.
                 if robot_name not in self.goals and robot_name not in self.new_plan_buffer:
@@ -772,8 +888,13 @@ class FleetCoordinator(Node):
 
             elif status == GoalStatus.STATUS_ABORTED:
                 self.get_logger().warn(f"FollowPath aborted for {robot_name}, keeping as moving")
+                self.exec_goal_handles.pop(robot_name, None)
+
+            elif status == GoalStatus.STATUS_CANCELED:
+                self.exec_goal_handles.pop(robot_name, None)
         except Exception:
-            pass
+            self.exec_in_flight.discard(robot_name)
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -784,9 +905,25 @@ def main(args=None):
         executor.spin()
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        # ExternalShutdownException fires when the launch file's benchmark
+        # timeout shuts the stack down
+        node.get_logger().info(f"Executor exited: {e}")
     finally:
+        # Ensure the metrics CSV is flushed to disk before the process dies
+        try:
+            if hasattr(node.metrics_logger, 'close'):
+                node.metrics_logger.close()
+            elif hasattr(node.metrics_logger, 'flush'):
+                node.metrics_logger.flush()
+        except Exception:
+            pass
         node.destroy_node()
-        rclpy.shutdown()
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
+
 
 if __name__ == '__main__':
     main()

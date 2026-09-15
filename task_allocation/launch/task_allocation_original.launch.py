@@ -2,13 +2,14 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from ament_index_python.packages import get_package_share_directory
-from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
+from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, TimerAction, EmitEvent
+from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 
-SEED = 42
+SEED = 15
 NUM_TASKS = 15
+RUN_DURATION_SEC = 300.0  # benchmark runs terminate 5 minutes after launch
 
 def generate_launch_description():
     task_allocation_dir = get_package_share_directory('task_allocation')
@@ -16,10 +17,13 @@ def generate_launch_description():
     multi_chomp_dir = get_package_share_directory('multi_chomp')
     
     # Import config file for task allocation
-    stations_config = os.path.join(task_allocation_dir, 'config', 'stations_random.yaml')
-    # Set file address for logs, TODO: CHANGE OURS TO ORIGINAL WHEN TESTING AGAINST EXTENDED SPADES
-    log_file_path = os.path.join(os.getcwd(), f'task_allocation_log_original_t{NUM_TASKS}_s{SEED}_r6.csv')
-    multi_chomp_metrics_path = os.path.join(os.getcwd(), f'multi_chomp_metrics_original_t{NUM_TASKS}_s{SEED}_r6.csv')
+    stations_config = os.path.join(task_allocation_dir, 'config', 'stations.yaml')
+    # All logs for this method go into their own folder
+    log_dir = os.path.join(os.getcwd(), 'logs', 'multi_chomp', 'r6', 'grouped')
+    os.makedirs(log_dir, exist_ok=True)
+
+    log_file_path = os.path.join(log_dir, f'task_allocation_log_original_t{NUM_TASKS}_s{SEED}.csv')
+    multi_chomp_metrics_path = os.path.join(log_dir, f'multi_chomp_metrics_original_t{NUM_TASKS}_s{SEED}.csv')
     
     # launch graph generator and multi chomp before running the task allocation stack
     graph_gen_launch = os.path.join(graph_generator_dir, 'launch', 'graph_generator.launch.py')
@@ -27,7 +31,16 @@ def generate_launch_description():
     multi_chomp_original_launch = os.path.join(multi_chomp_dir, 'launch', 'multi_chomp_original.launch.py')
     
     launch_description = LaunchDescription()
-    
+
+    # ===== BENCHMARK TIMEOUT =====
+    # Shuts down the entire stack (graph generator, multi chomp, task allocation)
+    # RUN_DURATION_SEC seconds after this launch starts.
+    launch_description.add_action(TimerAction(
+        period=RUN_DURATION_SEC,
+        actions=[EmitEvent(event=Shutdown(
+            reason=f'Benchmark finished: {RUN_DURATION_SEC:.0f}s timeout reached'))],
+    ))
+
     # ===== GRAPH GENERATOR =====
     # Generates skeleton graph from occupancy grid
     graph_gen_launch_include = IncludeLaunchDescription(
@@ -56,7 +69,7 @@ def generate_launch_description():
             {
                 'log_file_path': log_file_path,
                 'run_id': 'original',
-            }
+            },
         ],
         remappings=[
             ("/skeleton_graph/graph_markers", "/skeleton_graph/graph_markers"),
@@ -68,7 +81,7 @@ def generate_launch_description():
     # random task publisher node
     task_publisher_node = Node(
         package="task_allocation",
-        executable="task_publisher_node.py", 
+        executable="task_publisher_node.py",
         name="task_publisher_node",
         output="screen",
         parameters=[{
@@ -76,12 +89,12 @@ def generate_launch_description():
             'num_tasks': NUM_TASKS,
             'min_delay_s': 2.0,
             'max_delay_s': 8.0
-        }], 
+        }],
         remappings=[
             ('skeleton_graph_json', '/skeleton_graph_json'),
             ('/tasks', '/tasks'),
-        ]
+        ],
     )
     launch_description.add_action(task_publisher_node)
-    
+
     return launch_description
