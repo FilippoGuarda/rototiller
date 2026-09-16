@@ -70,7 +70,7 @@ class TaskAllocationNode(Node):
         self.retry_cooldown_sec = float(self.get_parameter("retry_cooldown_sec").value)
 
         self.station_dwell_time = 1.5
-        self.station_reservation_timeout = 300.0
+        self.station_reservation_timeout = 60.0
 
         base_log_file_path = str(self.get_parameter("log_file_path").value)
         if not self.has_parameter("run_id"):
