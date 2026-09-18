@@ -69,6 +69,12 @@ class TaskAllocationNode(Node):
             self.declare_parameter("retry_cooldown_sec", 5.0)
         self.retry_cooldown_sec = float(self.get_parameter("retry_cooldown_sec").value)
 
+        if not self.has_parameter("fleet_tf_ready_timeout_sec"):
+            self.declare_parameter("fleet_tf_ready_timeout_sec", 10.0)
+        self.fleet_tf_ready_timeout_sec = float(
+            self.get_parameter("fleet_tf_ready_timeout_sec").value
+        )
+
         self.station_dwell_time = 1.5
         self.station_reservation_timeout = 60.0
 
@@ -86,7 +92,6 @@ class TaskAllocationNode(Node):
         self.log_file_path = (
             f"{base}_{self.algorithm_type}_{self.run_id}_{timestamp}{ext}"
         )
-
         self.logger = TaskLogger(self.log_file_path)
 
         self.reentrant_callback_group = ReentrantCallbackGroup()
@@ -114,6 +119,7 @@ class TaskAllocationNode(Node):
         parking_stations = sorted(
             s.name for s in self.stations_by_type["p"] if s.online
         )
+
         assert len(parking_stations) >= self.num_robots
 
         # Immutable fixed home parking per robot — never overridden by optimizer
@@ -135,6 +141,10 @@ class TaskAllocationNode(Node):
         self.graph_nodes_map_coords: Dict[int, Tuple[float, float]] = {}
         self.station_nodes: Dict[str, int] = {}
 
+        # State for the bounded TF readiness gate (allocation only)
+        self._fleet_tf_deadline = None        # absolute time when the grace period ends
+        self._tf_subset_robots = None        # robots we already decided to proceed without
+
         qos_profile = QoSProfile(
             depth=10,
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
@@ -145,6 +155,7 @@ class TaskAllocationNode(Node):
             String, 'skeleton_graph_json', self.graph_callback,
             qos_profile, callback_group=self.graph_callback_group,
         )
+
         self.task_sub = self.create_subscription(
             String, "/tasks", self.task_callback,
             10, callback_group=self.reentrant_callback_group,
@@ -166,6 +177,7 @@ class TaskAllocationNode(Node):
             f"Update rate: {self.update_rate_hz} Hz, "
             f"Log file: {self.log_file_path}"
         )
+
         for r, ps in self.robot_parking_station.items():
             self.get_logger().info(f"  Robot {r} -> fixed home parking: {ps}")
 
@@ -201,7 +213,7 @@ class TaskAllocationNode(Node):
     def graph_callback(self, msg: String) -> None:
         try:
             data = json.loads(msg.data)
-            self.graph = nx.node_link_graph(data)
+            self.graph = nx.node_link_graph(data, edges="links")
             self.graph_nodes_map_coords.clear()
             for n, d in self.graph.nodes(data=True):
                 if 'pos' in d:
@@ -256,17 +268,104 @@ class TaskAllocationNode(Node):
             return None
 
     # --------------------------------------------------------------------- #
+    # Allocation readiness (gates ONLY the batch optimizer)
+    # --------------------------------------------------------------------- #
+
+    def _allocation_inputs_ready(self) -> bool:
+        """Bounded readiness gate for the batch allocator.
+
+        Hard condition: the skeleton graph must be injected (no station
+        nodes / path costs exist without it, so allocation would silently
+        fail and burn allocation_attempts).
+
+        Soft condition: robot TF. The ideal case waits until the whole
+        fleet is localized, but a robot whose TF never appears is given a
+        bounded grace period (fleet_tf_ready_timeout_sec), after which
+        allocation proceeds without it. Robots without TF are excluded by
+        allocate_task_batch's robot_tails logic and join automatically as
+        soon as their TF appears.
+
+        NOTE: home-parking dispatch and task progress tracking are NOT
+        gated by this function — they need TF only, not the graph. They run
+        on every update tick so idle robots head to parking (and Multi-CHOMP
+        starts coordinating them) as early as possible.
+        """
+        # --- Hard gate: skeleton graph ---
+        if self.graph.number_of_nodes() == 0 or not self.station_nodes:
+            self._fleet_tf_deadline = None
+            self._tf_subset_robots = None
+            self.get_logger().warning(
+                "Waiting for skeleton graph before allocating tasks...",
+                throttle_duration_sec=10.0,
+            )
+            return False
+
+        # --- Soft gate: robot TF ---
+        robots_without_tf = [
+            r for r in range(1, self.num_robots + 1)
+            if self.get_robot_position(r) is None
+        ]
+
+        if not robots_without_tf:
+            # Full fleet localized — normal operation.
+            self._fleet_tf_deadline = None
+            self._tf_subset_robots = None
+            return True
+
+        if len(robots_without_tf) == self.num_robots:
+            # Nothing is localized yet — nothing can be allocated.
+            self._fleet_tf_deadline = None
+            self._tf_subset_robots = None
+            self.get_logger().warning(
+                "Waiting for TF poses (no robot localized yet)...",
+                throttle_duration_sec=10.0,
+            )
+            return False
+
+        # Partial fleet localization: give the stragglers a bounded grace
+        # period, then proceed with the localized subset.
+        now = self.get_clock().now().nanoseconds / 1e9
+        missing = ", ".join(str(r) for r in robots_without_tf)
+
+        if self._fleet_tf_deadline is None:
+            self._fleet_tf_deadline = now + self.fleet_tf_ready_timeout_sec
+            self.get_logger().warn(
+                f"Robots without TF: {missing}. Proceeding with allocation "
+                f"for the localized fleet in "
+                f"{self.fleet_tf_ready_timeout_sec:.1f}s unless their TF appears."
+            )
+            return False
+
+        if now < self._fleet_tf_deadline:
+            self.get_logger().warning(
+                f"Waiting for TF poses of robots: {missing} "
+                f"({self._fleet_tf_deadline - now:.1f}s of grace period left)...",
+                throttle_duration_sec=5.0,
+            )
+            return False
+
+        if self._tf_subset_robots is None:
+            self._tf_subset_robots = set(robots_without_tf)
+            self.get_logger().warn(
+                f"Proceeding WITHOUT robots {missing} (no TF after "
+                f"{self.fleet_tf_ready_timeout_sec:.1f}s grace period). They "
+                f"will join allocation as soon as their TF appears."
+            )
+
+        return True
+
+    # --------------------------------------------------------------------- #
     # Status display
     # --------------------------------------------------------------------- #
 
     def print_status_table(self):
         os.system('cls' if os.name == 'nt' else 'clear')
-        print("\n" + "="*90)
+        print("\n" + "=" * 90)
         print(f" TASK ALLOCATION STATUS | PENDING: {len(self.task_queue)} | ROBOTS: {self.num_robots} ")
-        print("="*90)
+        print("=" * 90)
         print("\n [ ACTIVE ROBOT ASSIGNMENTS ]")
         print(f" {'ROBOT':<8} | {'TASK ID':<10} | {'LOCATION':<15} | {'COST':<8} | {'STATUS'}")
-        print(" " + "-"*86)
+        print(" " + "-" * 86)
         for r in range(1, self.num_robots + 1):
             task_info = self.robot_tasks[r]
             if task_info is None:
@@ -286,26 +385,25 @@ class TaskAllocationNode(Node):
 
         print("\n [ PENDING TASK QUEUE ]")
         if not self.task_queue:
-            print("  No tasks pending in queue.")
+            print(" No tasks pending in queue.")
         else:
             print(f" {'PRIORITY':<8} | {'TASK ID':<10} | {'REQUESTED STATIONS':<30} | {'ATTEMPTS'}")
-            print(" " + "-"*86)
+            print(" " + "-" * 86)
             for t in sorted(self.task_queue, key=lambda x: x.priority, reverse=True):
                 stations_str = "->".join(t.stations)
                 print(f" {t.priority:<8.1f} | {t.task_id:<10} | {stations_str:<30} | {t.allocation_attempts}/{self.max_allocation_attempts}")
-        print("="*90 + "\n")
+        print("=" * 90 + "\n")
 
     # --------------------------------------------------------------------- #
     # Task reception
     # NOTE: 'p' is NOT auto-appended here. Home parking is handled
-    #       exclusively by _dispatch_home_parking().
+    # exclusively by _dispatch_home_parking().
     # --------------------------------------------------------------------- #
 
     def task_callback(self, msg: String) -> None:
         parts = [p.strip() for p in msg.data.split(",")]
         if len(parts) < 2:
             return
-
         task_id = parts[0]
         stations_str = parts[1].split("|")
         priority = float(parts[2]) if len(parts) > 2 else 1.0
@@ -324,17 +422,35 @@ class TaskAllocationNode(Node):
         self.task_queue.append(task)
 
     # --------------------------------------------------------------------- #
-    # Home parking dispatch — bypasses optimizer entirely
+    # Home parking dispatch — bypasses optimizer decisions but goes through
+    # the coordinator, so parked/parking robots are part of Multi-CHOMP.
     # --------------------------------------------------------------------- #
 
     def _dispatch_home_parking(self, robot_id: int) -> None:
-        """Send robot to its fixed home parking station without using the optimizer."""
+        """Send robot to its fixed home parking station.
+
+        Runs on every update tick for idle robots — deliberately NOT gated
+        on the skeleton graph, because parking only needs the station
+        coordinates (stations.yaml) and the robot's own TF. Dispatching
+        parking early means idle robots enter the Multi-CHOMP optimization
+        (as coordinated trajectories toward parking) and the whole
+        pipeline (Nav2 planners, CHOMP server) warms up before the first
+        real task arrives.
+        """
         if self.robot_tasks[robot_id] is not None:
+            return
+
+        # Without TF for this robot we cannot tell whether it is already
+        # parked at its home station, and we cannot track its motion.
+        # Robots that gain TF later get parked on a later tick.
+        if self.get_robot_position(robot_id) is None:
             return
 
         park_station = self.robot_parking_station[robot_id]
 
-        # Already physically there
+        # Already physically there — no goal needed; the coordinator will
+        # treat this robot as a stationary obstacle (holding path) in the
+        # fleet optimization.
         if self.physical_occupancy.get(park_station) == robot_id:
             return
 
@@ -361,6 +477,7 @@ class TaskAllocationNode(Node):
             # is_parking=True immediately so robot is preemptible during transit
             'is_parking': True,
         }
+
         self.occupied_stations.add(park_station)
         self.send_to_station(robot_id, park_station, log_dispatch=True)
         self.get_logger().info(
@@ -406,8 +523,7 @@ class TaskAllocationNode(Node):
                     else:
                         robot_tails[r] = None
                         self.get_logger().warn(
-                            f'Robot {r}: no TF position available, excluded from allocation'
-                        )
+                            f'Robot {r}: no TF position available, excluded from allocation')
 
             # ---- 2. Build decision variables (per-robot combinations) -------
             x: Dict[Tuple[int, int], any] = {}
@@ -461,6 +577,7 @@ class TaskAllocationNode(Node):
                         and sname != self.robot_parking_station[r]
                         for sname in path
                     )
+
                     if parking_violation:
                         continue
 
@@ -484,6 +601,7 @@ class TaskAllocationNode(Node):
                         dist = nx.shortest_path_length(
                             self.full_graph, tail_node, target_node, weight='weight'
                         )
+
                         d_cost = self.alpha_d * dist
                         b_cost = float('inf') if remaining <= 0.0 else self.alpha_b * (dist / remaining)
                         u_cost = self.alpha_u * robot.usage_index
@@ -566,7 +684,7 @@ class TaskAllocationNode(Node):
                             #         ),
                             #     )
                             # )
-                            self.robot_tasks[r] = None 
+                            self.robot_tasks[r] = None
 
                         if self.robot_tasks[r] is None:
                             self.robot_tasks[r] = {
@@ -580,6 +698,7 @@ class TaskAllocationNode(Node):
                                 'had_collision': False,
                                 'is_parking': is_parking,
                             }
+
                             self.occupied_stations.add(selected_path[0])
                             self.send_to_station(r, selected_path[0], log_dispatch=True)
 
@@ -588,7 +707,6 @@ class TaskAllocationNode(Node):
                             if not is_parking and r in eligible_robots:
                                 eligible_robots.remove(r)
                         else:
-
                             self.get_logger().warn(
                                 f"Solver selected robot_{r} for {task.task_id} "
                                 f"but it is busy with a non-parking task. "
@@ -615,7 +733,8 @@ class TaskAllocationNode(Node):
                                     message="Task assigned to robot",
                                 )
                             )
-                            break
+
+                        break
 
         return assigned_task_ids
 
@@ -743,7 +862,7 @@ class TaskAllocationNode(Node):
             )
 
             if dist >= self.robot_footprint_radius:
-                    continue
+                continue
 
             # Robot has reached the current station.
             task_info["station_reservation_time"] = now_sec
@@ -780,35 +899,47 @@ class TaskAllocationNode(Node):
             ):
                 task_info["is_parking"] = True
 
-        # Send idle robots home before running the optimizer
+        # Send idle robots home on every tick (NOT gated on the skeleton
+        # graph). Robots that are not yet at their home parking station
+        # receive a parking goal immediately once their TF is up, so they
+        # enter the Multi-CHOMP fleet optimization right away and the
+        # pipeline warms up before the first real task.
         for r in range(1, self.num_robots + 1):
             if self.robot_tasks[r] is None:
                 self._dispatch_home_parking(r)
 
-        # Batch optimizer — only for real work tasks
-        idle_robots = [
-            r for r in range(1, self.num_robots + 1)
-            if self.robot_tasks[r] is None or self.robot_tasks[r].get('is_parking', False)
-        ]
+        # -------------------------------------------------------------------
+        # Batch optimizer — the only part gated on readiness. The skeleton
+        # graph is a hard requirement (allocation cannot cost paths without
+        # it); fleet TF is a bounded soft requirement. Tasks that arrive
+        # before the gate clears simply stay in the queue and are allocated
+        # on the first tick after it clears, so the first task executes as
+        # soon as the inputs exist.
+        # -------------------------------------------------------------------
+        if self._allocation_inputs_ready():
+            idle_robots = [
+                r for r in range(1, self.num_robots + 1)
+                if self.robot_tasks[r] is None or self.robot_tasks[r].get('is_parking', False)
+            ]
 
-        if self.task_queue and idle_robots:
-            batch_size = min(len(self.task_queue), self.task_batch_size)
-            batch = self.task_queue[:batch_size]
-            self.task_queue = self.task_queue[batch_size:]
+            if self.task_queue and idle_robots:
+                batch_size = min(len(self.task_queue), self.task_batch_size)
+                batch = self.task_queue[:batch_size]
+                self.task_queue = self.task_queue[batch_size:]
 
-            successfully_assigned_ids = self.allocate_task_batch(batch)
+                successfully_assigned_ids = self.allocate_task_batch(batch)
 
-            unassigned_tasks = [t for t in batch if t.task_id not in successfully_assigned_ids]
-            for t in unassigned_tasks:
-                t.allocation_attempts += 1
-                if t.allocation_attempts < self.max_allocation_attempts:
-                    self.task_queue.append(t)
-                else:
-                    self.get_logger().warn(
-                        f"Dropping task {t.task_id} after {self.max_allocation_attempts} attempts."
-                    )
+                unassigned_tasks = [t for t in batch if t.task_id not in successfully_assigned_ids]
+                for t in unassigned_tasks:
+                    t.allocation_attempts += 1
+                    if t.allocation_attempts < self.max_allocation_attempts:
+                        self.task_queue.append(t)
+                    else:
+                        self.get_logger().warn(
+                            f"Dropping task {t.task_id} after {self.max_allocation_attempts} attempts."
+                        )
 
-        self.print_status_table()
+        # self.print_status_table()
 
 
 def main(args=None):

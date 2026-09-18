@@ -35,6 +35,7 @@ class FleetCoordinator(Node):
         self.declare_parameter('goal_arrival_radius', 0.35)
         self.declare_parameter('logfilepath', os.path.join(os.getcwd(), 'multichomp_metrics.csv'))
         self.declare_parameter('runid', 'ours')
+        self.declare_parameter('plan_barrier_timeout_sec', 2.0)
 
         self.num_robots = self.get_parameter('num_robots').value
         self.controller_id = self.get_parameter('controller_id').value
@@ -52,6 +53,7 @@ class FleetCoordinator(Node):
         self.stuck_timeout_sec = self.get_parameter('stuck_timeout_sec').value
         self.stuck_motion_epsilon = self.get_parameter('stuck_motion_epsilon').value
         self.stuck_replan_cooldown_sec = self.get_parameter('stuck_replan_cooldown_sec').value
+        self.plan_barrier_timeout_sec = self.get_parameter('plan_barrier_timeout_sec').value
 
         self.max_optimized_segment_length = self.get_parameter('max_optimized_segment_length').value
         self.stretch_factor = self.get_parameter('stretch_factor').value
@@ -67,6 +69,8 @@ class FleetCoordinator(Node):
         self.optimization_in_progress = False
         self.pending_plan_requests = set()
         self.optimizing_plans = []
+
+        self._goals_pending_since = None
 
         self.last_robot_pose = {}
         self.last_motion_time = {}
@@ -115,8 +119,7 @@ class FleetCoordinator(Node):
             self.goal_subs.append(
                 self.create_subscription(
                     PoseStamped, f'/{name}/spades_goal',
-                    lambda msg, n=name: self.goal_callback(msg, n), 10, callback_group=self.cb_group)
-            )
+                    lambda msg, n=name: self.goal_callback(msg, n), 10, callback_group=self.cb_group))
 
         self.create_timer(0.5, self.coordination_loop, callback_group=self.cb_group)
         self.create_timer(1.0, self._log_minimum_distances, callback_group=self.cb_group)
@@ -146,10 +149,10 @@ class FleetCoordinator(Node):
         reception.
 
         Events:
-            CHOMP_TIME_FULL    -> complete replan (fresh Nav2 initializations,
-                                  100 iterations)
-            CHOMP_TIME_PARTIAL -> partial replan (sliding-window update of the
-                                  existing optimized paths, 10 iterations)
+        CHOMP_TIME_FULL   -> complete replan (fresh Nav2 initializations,
+                             100 iterations)
+        CHOMP_TIME_PARTIAL -> partial replan (sliding-window update of the
+                             existing optimized paths, 10 iterations)
 
         The time in seconds is stored in the 'duration' column. The 'message'
         column records the source (algorithm|round_trip) so the two can be
@@ -253,7 +256,7 @@ class FleetCoordinator(Node):
             message=f'robots_sampled={len(min_distances)}',
         ))
 
-    # Replanning helper functs
+    # Replanning helper functions
     def _segment_lengths(self, path):
         """Return distances between consecutive poses in a path."""
         lengths = []
@@ -269,7 +272,7 @@ class FleetCoordinator(Node):
         return lengths
 
     def _is_path_too_stretched(self, robot_name, optimized_path, reference_path=None):
-        """ Detects whether Multi-CHOMP produced path segments that are too long.
+        """Detects whether Multi-CHOMP produced path segments that are too long.
         This can happen when the costmap changes and the optimizer deforms
         the path too aggressively instead of producing a clean trajectory."""
         opt_lengths = self._segment_lengths(optimized_path)
@@ -312,19 +315,16 @@ class FleetCoordinator(Node):
         """
         if not self._can_force_replan(robot_name):
             self.get_logger().warn(
-                f"Skipping forced replan for {robot_name}: cooldown active."
-            )
+                f"Skipping forced replan for {robot_name}: cooldown active.")
             return False
 
         if robot_name not in self.active_goals and robot_name not in self.goals:
             self.get_logger().warn(
-                f"Cannot force replan for {robot_name}: no active goal available."
-            )
+                f"Cannot force replan for {robot_name}: no active goal available.")
             return False
 
         self.get_logger().warn(
-            f"Forcing new initialization trajectory for {robot_name}: {reason}"
-        )
+            f"Forcing new initialization trajectory for {robot_name}: {reason}")
 
         # If the robot already has an active goal, put it back into the planning queue.
         if robot_name in self.active_goals:
@@ -411,14 +411,12 @@ class FleetCoordinator(Node):
 
         if robot_name not in self.active_goals and robot_name not in self.goals:
             self.get_logger().warn(
-                f"{robot_name} seems stuck, but no goal is available for replanning."
-            )
+                f"{robot_name} seems stuck, but no goal is available for replanning.")
             return False
 
         self.get_logger().warn(
             f"{robot_name} has not moved for more than "
-            f"{self.stuck_timeout_sec:.1f} seconds. Recomputing full path."
-        )
+            f"{self.stuck_timeout_sec:.1f} seconds. Recomputing full path.")
 
         # Put the current active goal back into the planning queue.
         if robot_name in self.active_goals:
@@ -570,8 +568,7 @@ class FleetCoordinator(Node):
 
                 if math.hypot(first_pose.x - cx, first_pose.y - cy) > 0.6:
                     self.get_logger().warn(
-                        f"Robot {name} deviated heavily. Recomputing path entirely."
-                    )
+                        f"Robot {name} deviated heavily. Recomputing path entirely.")
 
                     if name in self.active_goals:
                         self.goals[name] = self.active_goals[name]
@@ -598,16 +595,34 @@ class FleetCoordinator(Node):
                     future = self.nav2_plan_clients[name].send_goal_async(goal_msg)
                     future.add_done_callback(
                         lambda f, n=name, seq=request_seq:
-                            self.nav2_plan_response_callback(f, n, seq)
-                    )
+                            self.nav2_plan_response_callback(f, n, seq))
 
         # Check Optimization Readiness
         robots_with_new_goals = [r for r in self.goals]
         robots_with_new_plans_ready = [r for r in robots_with_new_goals if r in self.new_plan_buffer]
 
-        # Wait until all newly requested plans have been returned by Nav2
+        # Track when the current set of pending goals first appeared.
+        if robots_with_new_goals:
+            if self._goals_pending_since is None:
+                self._goals_pending_since = self._now_sec()
+        else:
+            self._goals_pending_since = None
+
+        # Wait until all newly requested plans have been returned by Nav2,
+        # but never block the whole fleet indefinitely on a single slow or
+        # failed plan. After plan_barrier_timeout_sec, proceed with the
+        # plans that are ready; the stragglers stay in self.goals and their
+        # plans are simply re-requested on the next coordination cycle.
         if len(robots_with_new_goals) > 0 and len(robots_with_new_plans_ready) != len(robots_with_new_goals):
-            return
+            waited = self._now_sec() - (self._goals_pending_since or self._now_sec())
+            if waited < self.plan_barrier_timeout_sec:
+                return
+
+            self.get_logger().warn(
+                f"Plan barrier timed out after {waited:.1f}s "
+                f"({len(robots_with_new_plans_ready)}/{len(robots_with_new_goals)} plans ready). "
+                f"Proceeding with the plans that are ready.",
+                throttle_duration_sec=5.0)
 
         # Trigger closed-loop optimization if there are active trajectories or new plans to compute
         if len(robots_with_new_plans_ready) > 0 or len(self.moving_robots) > 0:
@@ -622,8 +637,7 @@ class FleetCoordinator(Node):
 
             goal_handle.get_result_async().add_done_callback(
                 lambda f, n=robot_name, seq=request_seq:
-                    self.nav2_plan_result_callback(f, n, seq)
-            )
+                    self.nav2_plan_result_callback(f, n, seq))
 
         except Exception:
             self.pending_plan_requests.discard(robot_name)
@@ -632,8 +646,7 @@ class FleetCoordinator(Node):
         try:
             if request_seq != self.plan_request_seq[robot_name]:
                 self.get_logger().warn(
-                    f"Ignoring stale Nav2 plan result for {robot_name}"
-                )
+                    f"Ignoring stale Nav2 plan result for {robot_name}")
                 self.pending_plan_requests.discard(robot_name)
                 return
             result = future.result().result
@@ -703,8 +716,7 @@ class FleetCoordinator(Node):
             self.get_logger().info(f"Triggering Fleet Optimization for {self.num_robots} robots...")
 
         self.chomp_client.send_goal_async(goal_msg).add_done_callback(
-            lambda f: self.optimization_response_callback(f)
-        )
+            lambda f: self.optimization_response_callback(f))
 
     def optimization_response_callback(self, future):
         try:
@@ -716,8 +728,7 @@ class FleetCoordinator(Node):
                 return
 
             goal_handle.get_result_async().add_done_callback(
-                lambda f: self.optimization_result_callback(f)
-            )
+                lambda f: self.optimization_result_callback(f))
 
         except Exception as e:
             self.get_logger().error(f"Optimization request failed: {e}")
@@ -760,8 +771,8 @@ class FleetCoordinator(Node):
                     current_pose = self.get_robot_pose(robot_name)
                     if self._is_near_path_end(robot_name, current_pose):
                         self.get_logger().debug(
-                            f"{robot_name} is near path end; skipping path resend this cycle."
-                        )
+                            f"{robot_name} is near path end; skipping path resend this cycle.")
+
                         continue
 
                     reference_path = self.active_paths.get(robot_name)
@@ -776,16 +787,14 @@ class FleetCoordinator(Node):
                         self.get_logger().warn(
                             f"Optimized path for {robot_name} is too stretched. "
                             f"Max segment: {max_segment:.3f} m, "
-                            f"threshold: {threshold:.3f} m."
-                        )
+                            f"threshold: {threshold:.3f} m.")
 
                         replanned = self._force_new_initialization_trajectory(
                             robot_name,
                             reason=(
                                 f"optimized path segment too long "
                                 f"({max_segment:.3f} m > {threshold:.3f} m)"
-                            )
-                        )
+                            ))
 
                         if replanned:
                             robots_requiring_replan.add(robot_name)
@@ -837,8 +846,7 @@ class FleetCoordinator(Node):
         if old_handle is not None:
             cancel_future = old_handle.cancel_goal_async()
             cancel_future.add_done_callback(
-                lambda f, n=robot_name, p=path: self._send_follow_path(n, p)
-            )
+                lambda f, n=robot_name, p=path: self._send_follow_path(n, p))
         else:
             self._send_follow_path(robot_name, path)
 
@@ -854,8 +862,7 @@ class FleetCoordinator(Node):
         self.exec_in_flight.add(robot_name)
 
         client.send_goal_async(goal_msg).add_done_callback(
-            lambda f, n=robot_name: self.execute_response_callback(f, n)
-        )
+            lambda f, n=robot_name: self.execute_response_callback(f, n))
 
     def execute_response_callback(self, future, robot_name):
         try:
@@ -863,8 +870,7 @@ class FleetCoordinator(Node):
             if goal_handle.accepted:
                 self.exec_goal_handles[robot_name] = goal_handle
                 goal_handle.get_result_async().add_done_callback(
-                    lambda f, n=robot_name: self.execute_result_callback(f, n)
-                )
+                    lambda f, n=robot_name: self.execute_result_callback(f, n))
             else:
                 self.get_logger().error(f"Controller REJECTED path for {robot_name}")
                 self.exec_in_flight.discard(robot_name)
