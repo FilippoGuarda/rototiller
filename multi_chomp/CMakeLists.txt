@@ -102,6 +102,7 @@ install(TARGETS
 install(PROGRAMS
   scripts/multi_chomp_coordinator_original.py
   scripts/rolling_chomp_coordinator.py
+  scripts/rolling_chomp_coordinator_thresholded.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
