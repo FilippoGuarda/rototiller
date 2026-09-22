@@ -7,7 +7,7 @@ from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 
-SEED = 7
+SEED = 15
 NUM_TASKS = 15
 
 RUN_DURATION_SEC = 300.0  # benchmark runs terminate 5 minutes after launch
@@ -18,10 +18,10 @@ def generate_launch_description():
     multi_chomp_dir = get_package_share_directory('multi_chomp')
     
     # Import config file for task allocation
-    stations_config = os.path.join(task_allocation_dir, 'config', 'stations.yaml')
+    stations_config = os.path.join(task_allocation_dir, 'config', 'stations_random.yaml')
 
     # All logs for this method go into their own folder
-    log_dir = os.path.join(os.getcwd(), 'logs', 'rolling_chomp', 'r6', 'dynamic')
+    log_dir = os.path.join(os.getcwd(), 'logs', 'rolling_chomp', 'r6', 'throwaway')
     os.makedirs(log_dir, exist_ok=True)
 
     log_file_path = os.path.join(log_dir, f'task_allocation_log_ours_t{NUM_TASKS}_s{SEED}.csv')

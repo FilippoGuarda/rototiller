@@ -47,8 +47,8 @@ def generate_launch_description():
 
     coordinator_node = Node(
         package='multi_chomp',
-        executable='rolling_chomp_coordinator.py', 
-        name='fleet_coordinator',
+        executable='rolling_chomp_coordinator.py',
+        name='fleet_coordinator',       
         output='screen',
         parameters=[
             LaunchConfiguration('config_file'),

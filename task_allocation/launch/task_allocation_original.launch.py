@@ -19,7 +19,7 @@ def generate_launch_description():
     # Import config file for task allocation
     stations_config = os.path.join(task_allocation_dir, 'config', 'stations.yaml')
     # All logs for this method go into their own folder
-    log_dir = os.path.join(os.getcwd(), 'logs', 'multi_chomp', 'r6', 'dynamic')
+    log_dir = os.path.join(os.getcwd(), 'logs', 'multi_chomp', 'r6', 'throwaway')
     os.makedirs(log_dir, exist_ok=True)
 
     log_file_path = os.path.join(log_dir, f'task_allocation_log_original_t{NUM_TASKS}_s{SEED}.csv')

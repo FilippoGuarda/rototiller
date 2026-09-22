@@ -670,9 +670,9 @@ class FleetCoordinator(Node):
         # Dynamic iterations: 100 for initial convergence, 10 for sliding-window updates
         full_replan = len(self.new_plan_buffer) > 0
         if full_replan:
-            goal_msg.max_iterations = 100
+            goal_msg.max_iterations = 1000
         else:
-            goal_msg.max_iterations = 10
+            goal_msg.max_iterations = 100
 
         # Keep track of which plans we are processing so we can cleanly pop them later
         self.optimizing_plans = list(self.new_plan_buffer.keys())

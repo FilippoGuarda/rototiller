@@ -385,7 +385,7 @@ class FleetCoordinator(Node):
 
         goal_msg = MultiChompOptimize.Goal()
         goal_msg.num_robots = self.num_robots
-        goal_msg.max_iterations = 100
+        goal_msg.max_iterations = 1000
 
         self.optimizing_plans = list(self.plan_buffer.keys())
         self.optimizing_robot_names = set(self.optimizing_plans)
