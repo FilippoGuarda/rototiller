@@ -164,7 +164,7 @@ void MultiChompActionServer::execute_goal(
     optimizer_->solve_step();
     ++iterations_executed;
     double current_cost = optimizer_->compute_current_cost();
-    RCLCPP_INFO(this->get_logger(), "current_cost: %f", current_cost);
+    // RCLCPP_INFO(this->get_logger(), "current_cost: %f", current_cost);
 
     if (std::abs(prev_cost - current_cost) < min_cost_change)
     {

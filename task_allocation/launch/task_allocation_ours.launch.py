@@ -10,7 +10,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 SEED = 15
 NUM_TASKS = 15
 
-RUN_DURATION_SEC = 300.0  # benchmark runs terminate 5 minutes after launch
+RUN_DURATION_SEC = 2000.0  # benchmark runs terminate 5 minutes after launch
 
 def generate_launch_description():
     task_allocation_dir = get_package_share_directory('task_allocation')
@@ -63,7 +63,7 @@ def generate_launch_description():
 
     task_allocation_node = Node(
         package="task_allocation",
-        executable="task_allocation_node.py",
+        executable="task_allocation_benchmark_node.py",
         name="task_allocation_node",
         namespace="/",
         output="screen",
