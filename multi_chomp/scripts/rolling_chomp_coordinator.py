@@ -893,7 +893,7 @@ class FleetCoordinator(Node):
                     self.active_paths.pop(robot_name, None)
 
             elif status == GoalStatus.STATUS_ABORTED:
-                self.get_logger().warn(f"FollowPath aborted for {robot_name}, keeping as moving")
+                # self.get_logger().warn(f"FollowPath aborted for {robot_name}, keeping as moving")
                 self.exec_goal_handles.pop(robot_name, None)
 
             elif status == GoalStatus.STATUS_CANCELED:

@@ -140,7 +140,7 @@ void MultiChompOriginalActionServer::execute_goal(
   const uint32_t max_iter = (goal->max_iterations > 0)
                                 ? goal->max_iterations
                                 : 200u;
-  const double min_cost_delta = 1;
+  const double min_cost_delta = 1e-1;
   double prev_cost = 1.0e9;
   uint32_t plateau = 0;
   uint32_t iterations_executed = 0;

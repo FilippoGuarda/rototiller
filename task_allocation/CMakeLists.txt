@@ -25,6 +25,7 @@ ament_python_install_package(${PROJECT_NAME})
 install(
   PROGRAMS
     task_allocation/task_allocation_node.py
+    task_allocation/task_allocation_node_reactive.py
     task_allocation/task_publisher_node.py
     task_allocation/allocation_comparison.py
     task_allocation/task_allocation_comparison_node.py

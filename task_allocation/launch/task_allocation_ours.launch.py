@@ -7,10 +7,10 @@ from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 
-SEED = 15
+SEED = 7
 NUM_TASKS = 15
 
-RUN_DURATION_SEC = 2000.0  # benchmark runs terminate 5 minutes after launch
+RUN_DURATION_SEC = 300.0  # benchmark runs terminate 5 minutes after launch
 
 def generate_launch_description():
     task_allocation_dir = get_package_share_directory('task_allocation')
@@ -21,7 +21,7 @@ def generate_launch_description():
     stations_config = os.path.join(task_allocation_dir, 'config', 'stations_random.yaml')
 
     # All logs for this method go into their own folder
-    log_dir = os.path.join(os.getcwd(), 'logs', 'rolling_chomp', 'r6', 'throwaway')
+    log_dir = os.path.join(os.getcwd(), 'logs', 'reactive', 'r6', 'random')
     os.makedirs(log_dir, exist_ok=True)
 
     log_file_path = os.path.join(log_dir, f'task_allocation_log_ours_t{NUM_TASKS}_s{SEED}.csv')
@@ -59,11 +59,11 @@ def generate_launch_description():
             'runid': 'ours',
         }.items()
     )
-    launch_description.add_action(rolling_chomp_launch_include)
+    # launch_description.add_action(rolling_chomp_launch_include)
 
     task_allocation_node = Node(
         package="task_allocation",
-        executable="task_allocation_benchmark_node.py",
+        executable="task_allocation_node_reactive.py",
         name="task_allocation_node",
         namespace="/",
         output="screen",
