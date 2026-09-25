@@ -18,14 +18,14 @@ def generate_launch_description():
     multi_chomp_dir = get_package_share_directory('multi_chomp')
     
     # Import config file for task allocation
-    stations_config = os.path.join(task_allocation_dir, 'config', 'stations_random.yaml')
+    stations_config = os.path.join(task_allocation_dir, 'config', 'stations.yaml')
 
     # All logs for this method go into their own folder
-    log_dir = os.path.join(os.getcwd(), 'logs', 'reactive', 'r6', 'random')
+    log_dir = os.path.join(os.getcwd(), 'logs', 'reactive', 'r6', 'dynamic')
     os.makedirs(log_dir, exist_ok=True)
 
-    log_file_path = os.path.join(log_dir, f'task_allocation_log_ours_t{NUM_TASKS}_s{SEED}.csv')
-    rolling_chomp_metrics_path = os.path.join(log_dir, f'rolling_chomp_metrics_ours_t{NUM_TASKS}_s{SEED}.csv')
+    log_file_path = os.path.join(log_dir, f'task_allocation_log_reactive_t{NUM_TASKS}_s{SEED}.csv')
+    rolling_chomp_metrics_path = os.path.join(log_dir, f'rolling_chomp_metrics_reactive_t{NUM_TASKS}_s{SEED}.csv')
     
     # launch graph generator and rolling chomp before running the task allocation stack
     graph_gen_launch = os.path.join(graph_generator_dir, 'launch', 'graph_generator.launch.py')
@@ -56,7 +56,7 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(rolling_chomp_launch),
         launch_arguments={
             'logfilepath': rolling_chomp_metrics_path,
-            'runid': 'ours',
+            'runid': 'reactive',
         }.items()
     )
     # launch_description.add_action(rolling_chomp_launch_include)
@@ -72,7 +72,7 @@ def generate_launch_description():
             # TODO: CHANGE RUN_ID TO ORIGINAL WHEN TESTING AGAINST EXTENDED SPADES
             {
                 'log_file_path': log_file_path,
-                'run_id': 'ours',
+                'run_id': 'reactive',
             },
         ],
         remappings=[

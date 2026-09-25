@@ -16,7 +16,6 @@ from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from std_msgs.msg import String
 from geometry_msgs.msg import PoseStamped
 from tf2_ros import Buffer, TransformListener
-from visualization_msgs.msg import MarkerArray
 
 from task_logger import TaskLogger, TaskLogRecord
 from task_allocation_helpers import StationConfig, Task, RobotState, build_full_graph_with_stations
@@ -92,8 +91,30 @@ class TaskAllocationNode(Node):
         self.log_file_path = (
             f"{base}_{self.algorithm_type}_{self.run_id}_{timestamp}{ext}"
         )
-
         self.logger = TaskLogger(self.log_file_path)
+
+        # Put the coordinator-format metrics CSV next to the task log,
+        # regardless of the node's working directory. Keep the coordinator's
+        # filename pattern: {base}_{runid}_coordinator_{timestamp}{ext}.
+        # 'logfilepath' is used only for its basename; the directory always
+        # comes from the task log's 'log_file_path' parameter.
+        if not self.has_parameter("logfilepath"):
+            self.declare_parameter("logfilepath", "multichomp_metrics.csv")
+        if not self.has_parameter("runid"):
+            self.declare_parameter("runid", self.run_id)
+
+        self.metrics_run_id = str(self.get_parameter("runid").value)
+        metrics_filename = os.path.basename(
+            str(self.get_parameter("logfilepath").value)
+        )
+        metrics_base, metrics_ext = os.path.splitext(metrics_filename)
+        if not metrics_ext:
+            metrics_ext = ".csv"
+        self.metrics_log_path = os.path.join(
+            os.path.dirname(os.path.abspath(self.log_file_path)),
+            f"{metrics_base}_{self.metrics_run_id}_coordinator_{timestamp}{metrics_ext}",
+        )
+        self.metrics_logger = TaskLogger(self.metrics_log_path)
 
         self.reentrant_callback_group = ReentrantCallbackGroup()
         self.graph_callback_group = MutuallyExclusiveCallbackGroup()
@@ -114,16 +135,13 @@ class TaskAllocationNode(Node):
         self.stations_by_type: Dict[str, List[StationConfig]] = {
             "a": [], "b": [], "c": [], "p": [],
         }
-
         self.load_station_config()
 
         parking_stations = sorted(
             s.name for s in self.stations_by_type["p"] if s.online
         )
-
         assert len(parking_stations) >= self.num_robots
 
-        # Immutable fixed home parking per robot — never overridden by optimizer
         self.robot_parking_station: Dict[int, str] = {
             r: parking_stations[r - 1]
             for r in range(1, self.num_robots + 1)
@@ -133,7 +151,6 @@ class TaskAllocationNode(Node):
         self.robot_tasks: Dict[int, Optional[dict]] = {
             i: None for i in range(1, self.num_robots + 1)
         }
-
         self.occupied_stations: Set[str] = set()
         self.physical_occupancy: Dict[str, int] = {}
 
@@ -141,35 +158,23 @@ class TaskAllocationNode(Node):
         self.full_graph = nx.Graph()
         self.graph_nodes_map_coords: Dict[int, Tuple[float, float]] = {}
         self.station_nodes: Dict[str, int] = {}
-
-        # State for the bounded TF readiness gate (allocation only)
-        self._fleet_tf_deadline = None  # absolute time when the grace period ends
-        self._tf_subset_robots = None  # robots we already decided to proceed without
+        self._fleet_tf_deadline = None
+        self._tf_subset_robots = None
 
         qos_profile = QoSProfile(
             depth=10,
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
             reliability=QoSReliabilityPolicy.RELIABLE,
         )
-
         self.graph_sub = self.create_subscription(
             String, 'skeleton_graph_json', self.graph_callback,
             qos_profile, callback_group=self.graph_callback_group,
         )
-
         self.task_sub = self.create_subscription(
             String, "/tasks", self.task_callback,
             10, callback_group=self.reentrant_callback_group,
         )
 
-        # Direct Nav2 goal publishers.
-        #
-        # Each robot's nav2 bt_navigator subscribes to 'goal_pose' in its own
-        # namespace and converts every PoseStamped it receives into a
-        # NavigateToPose action goal (preempting any navigation currently in
-        # progress). Publishing here therefore sends the goal straight to the
-        # robot's Nav2 stack the moment a task is assigned — no intermediate
-        # coordinator is involved.
         self.goal_pubs: Dict[int, rclpy.publisher.Publisher] = {}
         for robot_id in range(1, self.num_robots + 1):
             topic = f"/{self.robot_prefix}{robot_id}/goal_pose"
@@ -180,19 +185,20 @@ class TaskAllocationNode(Node):
             self.update_callback,
             callback_group=self.reentrant_callback_group,
         )
+        self.create_timer(
+            1.0,
+            self._log_minimum_distances,
+            callback_group=self.reentrant_callback_group,
+        )
 
         self.get_logger().info(
             f"Task Allocation Node initialized. Robots: {self.num_robots}, "
             f"Update rate: {self.update_rate_hz} Hz, "
-            f"Log file: {self.log_file_path}"
+            f"Log file: {self.log_file_path}, "
+            f"Metrics file: {self.metrics_log_path}"
         )
-
         for r, ps in self.robot_parking_station.items():
             self.get_logger().info(f"  Robot {r} -> fixed home parking: {ps}")
-
-    # --------------------------------------------------------------------- #
-    # Station config
-    # --------------------------------------------------------------------- #
 
     def load_station_config(self) -> None:
         for stype in ["a", "b", "c", "p"]:
@@ -214,10 +220,6 @@ class TaskAllocationNode(Node):
             f"C={len(self.stations_by_type['c'])}, "
             f"P={len(self.stations_by_type['p'])}"
         )
-
-    # --------------------------------------------------------------------- #
-    # Graph handling
-    # --------------------------------------------------------------------- #
 
     def graph_callback(self, msg: String) -> None:
         try:
@@ -262,10 +264,6 @@ class TaskAllocationNode(Node):
                 best_dist, best_node = d, n_id
         return best_node
 
-    # --------------------------------------------------------------------- #
-    # Robot pose
-    # --------------------------------------------------------------------- #
-
     def get_robot_position(self, robot_id: int) -> Optional[Tuple[float, float]]:
         frame = f"{self.robot_prefix}{robot_id}{self.robot_suffix}"
         try:
@@ -276,30 +274,8 @@ class TaskAllocationNode(Node):
         except Exception:
             return None
 
-    # --------------------------------------------------------------------- #
-    # Allocation readiness (gates ONLY the batch optimizer)
-    # --------------------------------------------------------------------- #
-
     def _allocation_inputs_ready(self) -> bool:
-        """Bounded readiness gate for the batch allocator.
-
-        Hard condition: the skeleton graph must be injected (no station
-        nodes / path costs exist without it, so allocation would silently
-        fail and burn allocation_attempts).
-
-        Soft condition: robot TF. The ideal case waits until the whole
-        fleet is localized, but a robot whose TF never appears is given a
-        bounded grace period (fleet_tf_ready_timeout_sec), after which
-        allocation proceeds without it. Robots without TF are excluded by
-        allocate_task_batch's robot_tails logic and join automatically as
-        soon as their TF appears.
-
-        NOTE: home-parking dispatch and task progress tracking are NOT
-        gated by this function — they need TF only, not the graph. They run
-        on every update tick so idle robots head to parking (and receive
-        their Nav2 goals) as early as possible.
-        """
-        # --- Hard gate: skeleton graph ---
+        """Require the skeleton graph, and wait only a bounded time for partial TF."""
         if self.graph.number_of_nodes() == 0 or not self.station_nodes:
             self._fleet_tf_deadline = None
             self._tf_subset_robots = None
@@ -309,20 +285,16 @@ class TaskAllocationNode(Node):
             )
             return False
 
-        # --- Soft gate: robot TF ---
         robots_without_tf = [
             r for r in range(1, self.num_robots + 1)
             if self.get_robot_position(r) is None
         ]
-
         if not robots_without_tf:
-            # Full fleet localized — normal operation.
             self._fleet_tf_deadline = None
             self._tf_subset_robots = None
             return True
 
         if len(robots_without_tf) == self.num_robots:
-            # Nothing is localized yet — nothing can be allocated.
             self._fleet_tf_deadline = None
             self._tf_subset_robots = None
             self.get_logger().warning(
@@ -331,11 +303,8 @@ class TaskAllocationNode(Node):
             )
             return False
 
-        # Partial fleet localization: give the stragglers a bounded grace
-        # period, then proceed with the localized subset.
         now = self.get_clock().now().nanoseconds / 1e9
         missing = ", ".join(str(r) for r in robots_without_tf)
-
         if self._fleet_tf_deadline is None:
             self._fleet_tf_deadline = now + self.fleet_tf_ready_timeout_sec
             self.get_logger().warn(
@@ -360,12 +329,7 @@ class TaskAllocationNode(Node):
                 f"{self.fleet_tf_ready_timeout_sec:.1f}s grace period). They "
                 f"will join allocation as soon as their TF appears."
             )
-
         return True
-
-    # --------------------------------------------------------------------- #
-    # Status display
-    # --------------------------------------------------------------------- #
 
     def print_status_table(self):
         os.system('cls' if os.name == 'nt' else 'clear')
@@ -386,10 +350,10 @@ class TaskAllocationNode(Node):
                 cost = task_info.get('allocation_cost', 0.0) or 0.0
                 is_parking = task_info.get('is_parking', False)
                 loc = f"{path[idx]} ({idx+1}/{len(path)})" if idx < len(path) else "DONE"
-                if is_parking:
-                    status_str = f"Parking @ {self.robot_parking_station[r]}"
-                else:
-                    status_str = f"Executing sequence {'->'.join(path)}"
+                status_str = (
+                    f"Parking @ {self.robot_parking_station[r]}" if is_parking
+                    else f"Executing sequence {'->'.join(path)}"
+                )
                 print(f"  Robot {r:<2} | {task_id:<10} | {loc:<15} | {float(cost):<8.1f} | {status_str}")
 
         print("\n [ PENDING TASK QUEUE ]")
@@ -402,12 +366,6 @@ class TaskAllocationNode(Node):
                 stations_str = "->".join(t.stations)
                 print(f"  {t.priority:<8.1f} | {t.task_id:<10} | {stations_str:<30} | {t.allocation_attempts}/{self.max_allocation_attempts}")
         print("=" * 90 + "\n")
-
-    # --------------------------------------------------------------------- #
-    # Task reception
-    # NOTE: 'p' is NOT auto-appended here. Home parking is handled
-    # exclusively by _dispatch_home_parking().
-    # --------------------------------------------------------------------- #
 
     def task_callback(self, msg: String) -> None:
         parts = [p.strip() for p in msg.data.split(",")]
@@ -430,38 +388,15 @@ class TaskAllocationNode(Node):
         )
         self.task_queue.append(task)
 
-    # --------------------------------------------------------------------- #
-    # Home parking dispatch — bypasses optimizer decisions and sends the
-    # Nav2 goal directly to the robot.
-    # --------------------------------------------------------------------- #
-
     def _dispatch_home_parking(self, robot_id: int) -> None:
-        """Send robot to its fixed home parking station.
-
-        Runs on every update tick for idle robots — deliberately NOT gated
-        on the skeleton graph, because parking only needs the station
-        coordinates (stations.yaml) and the robot's own TF. Dispatching
-        parking early means idle robots receive their Nav2 goal right away
-        and the whole pipeline (planner, controller, recovery behaviors)
-        warms up before the first real task arrives.
-        """
         if self.robot_tasks[robot_id] is not None:
             return
-
-        # Without TF for this robot we cannot tell whether it is already
-        # parked at its home station, and we cannot track its motion.
-        # Robots that gain TF later get parked on a later tick.
         if self.get_robot_position(robot_id) is None:
             return
 
         park_station = self.robot_parking_station[robot_id]
-
-        # Already physically there — no goal needed; the robot simply
-        # holds its position at the station.
         if self.physical_occupancy.get(park_station) == robot_id:
             return
-
-        # Home parking is occupied by another robot — wait
         if park_station in self.occupied_stations:
             occupant = self.physical_occupancy.get(park_station)
             if occupant is not None and occupant != robot_id:
@@ -481,7 +416,6 @@ class TaskAllocationNode(Node):
             'station_reservation_time': now_sec,
             'allocation_cost': 0.0,
             'had_collision': False,
-            # is_parking=True immediately so robot is preemptible during transit
             'is_parking': True,
         }
         self.occupied_stations.add(park_station)
@@ -489,10 +423,6 @@ class TaskAllocationNode(Node):
         self.get_logger().info(
             f"Robot {robot_id} dispatched to fixed home parking: {park_station}"
         )
-
-    # --------------------------------------------------------------------- #
-    # OR-Tools Batch Allocation
-    # --------------------------------------------------------------------- #
 
     def allocate_task_batch(self, tasks: List[Task]) -> set:
         assigned_task_ids = set()
@@ -510,7 +440,6 @@ class TaskAllocationNode(Node):
                 self.get_logger().error("OR-Tools SCIP solver unavailable.")
                 return assigned_task_ids
 
-            # ---- 1. Determine tails ----------------------------------------
             robot_tails: Dict[int, Optional[int]] = {}
             for r in eligible_robots:
                 task_info = self.robot_tasks[r]
@@ -531,14 +460,9 @@ class TaskAllocationNode(Node):
                         self.get_logger().warn(
                             f'Robot {r}: no TF position available, excluded from allocation')
 
-            # ---- 2. Build decision variables (per-robot combinations) -------
             x: Dict[Tuple[int, int], any] = {}
             costs: Dict[Tuple[int, int], float] = {}
-            # Mutual exclusion: only path[0] (the immediate target).
-            # Intermediate stations are NOT pre-reserved to avoid deadlocks —
-            # the cost minimizer naturally separates robots across stations.
             station_usage_vars: Dict[str, list] = {}
-            # Store per-robot combination lists for the assignment block
             robot_combinations: Dict[int, list] = {}
 
             for r in eligible_robots:
@@ -546,19 +470,16 @@ class TaskAllocationNode(Node):
                 if tail_node is None:
                     continue
 
-                # Expand station tokens into concrete names for THIS robot.
                 groups = []
                 for item in task.stations:
                     if (
                         item == "p"
                         or (item in self.stations and self.stations[item].station_type == "p")
                     ):
-                        # Always resolve 'p' to this robot's fixed home parking
                         groups.append([self.robot_parking_station[r]])
                     elif item in self.stations:
                         groups.append([item])
                     elif item in self.stations_by_type:
-                        # Pre-filter: only offer stations that are currently free
                         available = [
                             s.name for s in self.stations_by_type[item]
                             if s.online
@@ -572,12 +493,10 @@ class TaskAllocationNode(Node):
 
                 combinations = list(itertools.product(*groups))
                 robot_combinations[r] = combinations
-
                 robot = self.robot_states[r]
                 remaining = robot.battery_soc * robot.max_range_m
 
                 for c_idx, path in enumerate(combinations):
-                    # Reject combinations that assign this robot the wrong parking station
                     parking_violation = any(
                         self.stations[sname].station_type == "p"
                         and sname != self.robot_parking_station[r]
@@ -586,9 +505,6 @@ class TaskAllocationNode(Node):
                     if parking_violation:
                         continue
 
-                    # Reject combinations where path[0] is already hard-reserved.
-                    # Intermediate stations are NOT blocked here — they are
-                    # momentary occupancies that will be free when needed.
                     first_station = path[0]
                     if (
                         first_station in self.occupied_stations
@@ -606,7 +522,6 @@ class TaskAllocationNode(Node):
                         dist = nx.shortest_path_length(
                             self.full_graph, tail_node, target_node, weight='weight'
                         )
-
                         d_cost = self.alpha_d * dist
                         b_cost = float('inf') if remaining <= 0.0 else self.alpha_b * (dist / remaining)
                         u_cost = self.alpha_u * robot.usage_index
@@ -622,10 +537,6 @@ class TaskAllocationNode(Node):
                         var = solver.IntVar(0, 1, f'x_{r}_{c_idx}')
                         x[(r, c_idx)] = var
                         costs[(r, c_idx)] = cost
-
-                        # Mutual exclusion only on path[0] (immediate target).
-                        # This prevents two robots from racing to the same first
-                        # station without causing deadlocks on intermediate ones.
                         if first_station not in station_usage_vars:
                             station_usage_vars[first_station] = []
                         station_usage_vars[first_station].append(var)
@@ -636,20 +547,13 @@ class TaskAllocationNode(Node):
             if not x:
                 continue
 
-            # ---- 3. Constraints --------------------------------------------
-            # Exactly one (robot, combination) pair is selected per task
             solver.Add(solver.Sum(x.values()) == 1)
-
-            # No two robots may target the same first station simultaneously
             for sname, vars_using_station in station_usage_vars.items():
                 if len(vars_using_station) > 1:
                     solver.Add(solver.Sum(vars_using_station) <= 1)
-
             solver.Minimize(
                 solver.Sum(var * costs[key] for key, var in x.items())
             )
-
-            # ---- 4. Solve and assign ----------------------------------------
             status = solver.Solve()
 
             if status in (pywraplp.Solver.OPTIMAL, pywraplp.Solver.FEASIBLE):
@@ -657,41 +561,16 @@ class TaskAllocationNode(Node):
                     if var.solution_value() > 0.5:
                         combinations = robot_combinations[r]
                         selected_path = list(combinations[c_idx])
-
                         is_parking = (
                             len(selected_path) == 1
                             and self.stations[selected_path[0]].station_type == "p"
                         )
-
                         assigned_task_ids.add(task.task_id)
 
-                        # Preempt parking if robot is currently heading home.
-                        # Publishing a new Nav2 goal on goal_pose preempts the
-                        # ongoing navigation server-side, so no explicit cancel
-                        # is required.
                         if self.robot_tasks[r] is not None and self.robot_tasks[r].get("is_parking", False):
                             old_task = self.robot_tasks[r]
                             self.occupied_stations.discard(old_task["path"][0])
                             self.robot_states[r].usage_index = max(0.0, self.robot_states[r].usage_index - 1.0)
-                            # Uncomment for logging when parking gets preempted
-                            # self.logger.log(
-                            #     TaskLogRecord(
-                            #         timestamp=now_sec,
-                            #         run_id=self.run_id,
-                            #         task_id=old_task["task_id"],
-                            #         robot_id=f"robot_{r}",
-                            #         event="CANCELLED",
-                            #         status="PREEMPTED",
-                            #         allocation_cost=old_task.get("allocation_cost"),
-                            #         duration=now_sec - old_task["start_time"],
-                            #         path="->".join(old_task["path"]),
-                            #         collision_flag=int(old_task.get("had_collision", False)),
-                            #         message=(
-                            #             f"Parking at {old_task['path'][0]} preempted by new task. "
-                            #             f"Robot {r} will return to {self.robot_parking_station[r]} on completion."
-                            #         ),
-                            #     )
-                            # )
                             self.robot_tasks[r] = None
 
                         if self.robot_tasks[r] is None:
@@ -707,13 +586,8 @@ class TaskAllocationNode(Node):
                                 'is_parking': is_parking,
                             }
                             self.occupied_stations.add(selected_path[0])
-
-                            # Send the Nav2 goal directly to the robot, at
-                            # assignment time.
                             self.send_to_station(r, selected_path[0], log_dispatch=True)
-
                             assigned_task_ids.add(task.task_id)
-
                             if not is_parking and r in eligible_robots:
                                 eligible_robots.remove(r)
                         else:
@@ -725,8 +599,6 @@ class TaskAllocationNode(Node):
                             continue
 
                         self.robot_states[r].usage_index += 1.0
-
-                        # Do not log parking tasks
                         if not is_parking:
                             self.logger.log(
                                 TaskLogRecord(
@@ -747,17 +619,7 @@ class TaskAllocationNode(Node):
 
         return assigned_task_ids
 
-    # --------------------------------------------------------------------- #
-    # Navigation
-    # --------------------------------------------------------------------- #
-
     def send_to_station(self, robot_id: int, station_name: str, log_dispatch: bool = True) -> None:
-        """Publish a Nav2 goal for `station_name` directly to the robot.
-
-        The robot's nav2 bt_navigator subscribes to `goal_pose` in its
-        namespace and turns this PoseStamped into a NavigateToPose action
-        goal, preempting any navigation already in progress.
-        """
         station = self.stations[station_name]
         msg = PoseStamped()
         msg.header.frame_id = self.global_frame
@@ -766,16 +628,11 @@ class TaskAllocationNode(Node):
         msg.pose.position.y = float(station.position[1])
         msg.pose.orientation.w = 1.0
         self.goal_pubs[robot_id].publish(msg)
-
         if log_dispatch:
             self.get_logger().info(
                 f"Nav2 goal sent to robot {robot_id}: station {station_name} "
                 f"({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f})"
             )
-
-    # --------------------------------------------------------------------- #
-    # Collision and occupancy tracking
-    # --------------------------------------------------------------------- #
 
     def update_collision_flags(self) -> None:
         positions: Dict[int, Tuple[float, float]] = {}
@@ -808,14 +665,71 @@ class TaskAllocationNode(Node):
                 if d < self.robot_footprint_radius:
                     self.physical_occupancy[s_name] = r
 
-    # --------------------------------------------------------------------- #
-    # Main update loop
-    # --------------------------------------------------------------------- #
+    def _now_sec(self) -> float:
+        return self.get_clock().now().nanoseconds / 1e9
+
+    def _log_minimum_distances(self) -> None:
+        """Write the coordinator's MIN_DISTANCE rows and fleet average at 1 Hz."""
+        poses: Dict[int, Tuple[float, float]] = {}
+        for r in range(1, self.num_robots + 1):
+            pos = self.get_robot_position(r)
+            if pos is not None:
+                poses[r] = pos
+        if len(poses) < 2:
+            return
+
+        timestamp = self._now_sec()
+        min_distances: Dict[int, Tuple[float, int]] = {}
+        for r, (x1, y1) in poses.items():
+            nearest_id: Optional[int] = None
+            nearest_distance = float('inf')
+            for other_r, (x2, y2) in poses.items():
+                if other_r == r:
+                    continue
+                distance = math.hypot(x2 - x1, y2 - y1)
+                if distance < nearest_distance:
+                    nearest_distance = distance
+                    nearest_id = other_r
+            if nearest_id is not None:
+                min_distances[r] = (nearest_distance, nearest_id)
+        if not min_distances:
+            return
+
+        average_min_distance = sum(d for d, _ in min_distances.values()) / len(min_distances)
+        for r, (min_distance, nearest_id) in min_distances.items():
+            self.metrics_logger.log(
+                TaskLogRecord(
+                    timestamp=timestamp,
+                    run_id=self.metrics_run_id,
+                    task_id='-',
+                    robot_id=f'robot{r}',
+                    event='MIN_DISTANCE',
+                    status='OK',
+                    allocation_cost=min_distance,
+                    duration=average_min_distance,
+                    path='',
+                    collision_flag=0,
+                    message=f'nearest_robot=robot{nearest_id}',
+                )
+            )
+        self.metrics_logger.log(
+            TaskLogRecord(
+                timestamp=timestamp,
+                run_id=self.metrics_run_id,
+                task_id='-',
+                robot_id='fleet',
+                event='MIN_DISTANCE_AVG',
+                status='OK',
+                allocation_cost=average_min_distance,
+                duration=None,
+                path='',
+                collision_flag=0,
+                message=f'robots_sampled={len(min_distances)}',
+            )
+        )
 
     def update_callback(self) -> None:
         now_sec = self.get_clock().now().nanoseconds / 1e9
-
-        # Reservation timeout housekeeping
         for r, task_info in self.robot_tasks.items():
             if not task_info:
                 continue
@@ -833,22 +747,18 @@ class TaskAllocationNode(Node):
         self.update_physical_occupancy()
         self.update_collision_flags()
 
-        # Progress active tasks
         for r in range(1, self.num_robots + 1):
             task_info = self.robot_tasks[r]
             if not task_info:
                 continue
-
             path: List[str] = task_info["path"]
             curr_idx: int = task_info["current_idx"]
 
-            # Task fully completed
             if curr_idx >= len(path):
                 now_sec = self.get_clock().now().nanoseconds / 1e9
                 duration = now_sec - task_info["start_time"]
                 self.occupied_stations.discard(path[-1])
                 collision_flag = 1 if task_info.get("had_collision", False) else 0
-
                 self.logger.log(
                     TaskLogRecord(
                         timestamp=now_sec,
@@ -866,17 +776,14 @@ class TaskAllocationNode(Node):
                 )
                 self.robot_states[r].usage_index = max(0.0, self.robot_states[r].usage_index - 1.0)
                 self.robot_tasks[r] = None
-                # Immediately send home — no optimizer involvement
                 self._dispatch_home_parking(r)
                 continue
 
             curr_station_name = path[curr_idx]
             curr_station = self.stations[curr_station_name]
-
             r_pos = self.get_robot_position(r)
             if r_pos is None:
                 continue
-
             dist = math.hypot(
                 r_pos[0] - curr_station.position[0],
                 r_pos[1] - curr_station.position[1],
@@ -884,23 +791,16 @@ class TaskAllocationNode(Node):
             if dist >= self.robot_footprint_radius:
                 continue
 
-            # Robot has reached the current station.
             task_info["station_reservation_time"] = now_sec
-
-            # First update inside the station radius starts the dwell timer.
             if task_info["arrival_time"] is None:
                 task_info["arrival_time"] = now_sec
                 continue
-
-            # Enforce the configured station dwell time.
             if now_sec - task_info["arrival_time"] < self.station_dwell_time:
                 continue
 
-            # The robot has completed the current station visit.
             if curr_idx == len(path) - 1:
                 task_info["current_idx"] += 1
                 task_info["arrival_time"] = None
-
                 if self.stations[curr_station_name].station_type == "p":
                     self.occupied_stations.discard(curr_station_name)
                     task_info["is_parking"] = True
@@ -912,42 +812,26 @@ class TaskAllocationNode(Node):
             self.send_to_station(r, next_station, log_dispatch=True)
             task_info["current_idx"] += 1
             task_info["arrival_time"] = None
-
             if (
                 task_info["current_idx"] == len(path) - 1
                 and self.stations[next_station].station_type == "p"
             ):
                 task_info["is_parking"] = True
 
-        # Send idle robots home on every tick (NOT gated on the skeleton
-        # graph). Robots that are not yet at their home parking station
-        # receive a Nav2 parking goal immediately once their TF is up, so the
-        # navigation pipeline warms up before the first real task.
         for r in range(1, self.num_robots + 1):
             if self.robot_tasks[r] is None:
                 self._dispatch_home_parking(r)
 
-        # -------------------------------------------------------------------
-        # Batch optimizer — the only part gated on readiness. The skeleton
-        # graph is a hard requirement (allocation cannot cost paths without
-        # it); fleet TF is a bounded soft requirement. Tasks that arrive
-        # before the gate clears simply stay in the queue and are allocated
-        # on the first tick after it clears, so the first task executes as
-        # soon as the inputs exist.
-        # -------------------------------------------------------------------
         if self._allocation_inputs_ready():
             idle_robots = [
                 r for r in range(1, self.num_robots + 1)
                 if self.robot_tasks[r] is None or self.robot_tasks[r].get('is_parking', False)
             ]
-
             if self.task_queue and idle_robots:
                 batch_size = min(len(self.task_queue), self.task_batch_size)
                 batch = self.task_queue[:batch_size]
                 self.task_queue = self.task_queue[batch_size:]
-
                 successfully_assigned_ids = self.allocate_task_batch(batch)
-
                 unassigned_tasks = [t for t in batch if t.task_id not in successfully_assigned_ids]
                 for t in unassigned_tasks:
                     t.allocation_attempts += 1
@@ -957,8 +841,6 @@ class TaskAllocationNode(Node):
                         self.get_logger().warn(
                             f"Dropping task {t.task_id} after {self.max_allocation_attempts} attempts."
                         )
-
-        # self.print_status_table()
 
 
 def main(args=None):
@@ -971,6 +853,14 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        for log_instance in (node.metrics_logger, node.logger):
+            try:
+                if hasattr(log_instance, 'close'):
+                    log_instance.close()
+                elif hasattr(log_instance, 'flush'):
+                    log_instance.flush()
+            except Exception:
+                pass
         node.destroy_node()
         rclpy.shutdown()
 
